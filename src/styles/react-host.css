@@ -1,0 +1,5 @@
+/* React preservation host: display:contents avoids introducing a layout box around the V19 DOM. */
+#root,
+#v19-host {
+  display: contents;
+}
