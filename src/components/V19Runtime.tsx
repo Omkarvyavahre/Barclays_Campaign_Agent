@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { V19_MARKUP } from '../runtime/v19Markup';
 import { V19_SCRIPTS } from '../runtime/scriptManifest';
+import { installBrowserBridge } from '../services/bridge/browserBridge';
+import { installV19Adapter } from '../services/runtime/v19Adapter';
 
 /**
  * Preservation-first React host for the V19 campaign demo.
@@ -16,6 +18,7 @@ export function V19Runtime() {
   useEffect(() => {
     let cancelled = false;
     const mountedScripts: HTMLScriptElement[] = [];
+    let uninstallAdapter: (() => void) | undefined;
 
     const loadScripts = async () => {
       // The DOM must exist before the first V19 script executes.
@@ -35,7 +38,17 @@ export function V19Runtime() {
         });
       }
 
-      if (!cancelled) setReady(true);
+      if (cancelled) return;
+
+      // Attached only after the runtime exists. The adapter wraps two V19
+      // entry points; it does not alter markup, styles or renderers.
+      const bridge = installBrowserBridge();
+      uninstallAdapter = installV19Adapter({
+        bridge,
+        onError: (scope, error) => console.error(`[V19 adapter:${scope}]`, error),
+      });
+
+      setReady(true);
     };
 
     loadScripts().catch((error) => {
@@ -44,6 +57,7 @@ export function V19Runtime() {
 
     return () => {
       cancelled = true;
+      uninstallAdapter?.();
       for (const script of mountedScripts) script.remove();
     };
   }, []);
