@@ -15,11 +15,14 @@
  * This module only ever produces the first two. Promotion to *approved* is a
  * human edit of `server/images/approved.ts`; nothing here can write it.
  *
- * Generation is memoised per run and channel, so the trigger is idempotent:
- * opening Stage 7, switching tabs, re-rendering, replaying DOM mutations or
- * calling the entry point again cannot produce a second provider call. A run
- * that has been retired can no longer promote anything, so a slow result from a
- * previous run cannot land on a newer one.
+ * Automatic generation is memoised per run and channel, so the brief trigger is
+ * idempotent: opening Stage 7, switching tabs, re-rendering, replaying DOM
+ * mutations or calling the entry point again cannot produce a second provider
+ * call. Explicit manual regeneration is a separate path that intentionally
+ * bypasses that memoisation for one channel, with its own in-flight guard.
+ *
+ * A run that has been retired can no longer promote anything, so a slow result
+ * from a previous run cannot land on a newer one.
  */
 
 import type { BarclaysServices, GeneratedImageAsset, ImageChannel, ImageRequestPayload } from '../bridge/types';
@@ -39,12 +42,22 @@ export interface CandidateTelemetry {
   linkedin: CandidateStatus;
   email: CandidateStatus;
   lastRejection?: string;
+  /** Channel currently mid-flight for an automatic or manual generation. */
+  pendingChannel?: ImageChannel;
 }
 
 interface ChannelEntry {
   status: CandidateStatus;
+  /**
+   * Last successfully promoted asset for this run/channel. Kept across a failed
+   * or rejected regeneration so the on-screen creative never blanks.
+   */
   asset: GeneratedImageAsset | null;
   promise: Promise<void>;
+  /** Last manual attempt token that started a generation for this channel. */
+  lastAttemptToken?: string;
+  /** How many explicit manual regenerations have been started this run. */
+  manualRegenCount: number;
 }
 
 interface Run {
@@ -87,12 +100,22 @@ function statusOf(channel: ImageChannel): CandidateStatus {
   return activeRun?.entries.get(channel)?.status ?? 'idle';
 }
 
+function pendingChannelOf(): ImageChannel | undefined {
+  if (!activeRun) return undefined;
+  for (const channel of CANDIDATE_CHANNELS) {
+    if (activeRun.entries.get(channel)?.status === 'pending') return channel;
+  }
+  return undefined;
+}
+
 export function getCandidateTelemetry(): CandidateTelemetry {
+  const pendingChannel = pendingChannelOf();
   return {
     runId: activeRun?.runId ?? null,
     linkedin: statusOf('linkedin'),
     email: statusOf('email'),
     ...(lastRejection ? { lastRejection } : {}),
+    ...(pendingChannel ? { pendingChannel } : {}),
   };
 }
 
@@ -116,10 +139,14 @@ export function resetCreativeCandidates(): void {
   lastRejection = undefined;
 }
 
-/** The validated background for the active run, or null while none exists. */
+/**
+ * The validated background for the active run, or null while none exists.
+ *
+ * A prior successful asset remains visible while a regeneration is in flight or
+ * after a failed attempt, so a bad manual regeneration cannot blank the creative.
+ */
 export function currentRunAsset(channel: ImageChannel): GeneratedImageAsset | null {
-  const entry = activeRun?.entries.get(channel);
-  return entry?.status === 'ready' ? entry.asset : null;
+  return activeRun?.entries.get(channel)?.asset ?? null;
 }
 
 export function subscribeToCreativeCandidates(listener: () => void): () => void {
@@ -144,12 +171,32 @@ export interface StartCandidatesOptions {
   onError?: (channel: ImageChannel, error: unknown) => void;
 }
 
+export interface RegenerateCandidateOptions {
+  bridge: BarclaysServices;
+  runId: number;
+  channel: ImageChannel;
+  /**
+   * Distinct token per explicit user click. Scoped with runId + channel so two
+   * regenerations can select different composition variants.
+   */
+  attemptToken: string;
+  request: (channel: ImageChannel) => ImageRequestPayload | null;
+  onError?: (channel: ImageChannel, error: unknown) => void;
+}
+
+export interface RegenerateCandidateResult {
+  started: boolean;
+  /** Present when started; settles when the single generation attempt finishes. */
+  promise?: Promise<void>;
+  reason?: 'pending' | 'no-run';
+}
+
 function stale(run: Run): boolean {
   return activeRun !== run;
 }
 
 async function generate(
-  options: StartCandidatesOptions,
+  options: Pick<StartCandidatesOptions, 'bridge' | 'request' | 'onError'>,
   run: Run,
   channel: ImageChannel,
   entry: ChannelEntry,
@@ -158,6 +205,7 @@ async function generate(
   if (!payload) {
     entry.status = 'rejected';
     lastRejection = `${channel}: insufficient campaign context`;
+    notify();
     return;
   }
 
@@ -172,18 +220,21 @@ async function generate(
   if (!response.ok) {
     entry.status = 'failed';
     lastRejection = `${channel}: ${response.error.category}`;
+    notify();
     return;
   }
 
   // Mock mode carries no asset, which means "keep the existing background".
   if (response.data.source === 'mock' || !response.data.asset) {
     entry.status = 'mock';
+    notify();
     return;
   }
 
   if (!isPromotableAsset(response.data.asset, channel)) {
     entry.status = 'rejected';
     lastRejection = `${channel}: candidate failed objective validation`;
+    notify();
     return;
   }
 
@@ -206,17 +257,68 @@ export function startCreativeCandidates(options: StartCandidatesOptions): void {
   for (const channel of CANDIDATE_CHANNELS) {
     if (run.entries.has(channel)) continue;
 
-    const entry: ChannelEntry = { status: 'pending', asset: null, promise: Promise.resolve() };
+    const entry: ChannelEntry = {
+      status: 'pending',
+      asset: null,
+      promise: Promise.resolve(),
+      manualRegenCount: 0,
+    };
     run.entries.set(channel, entry);
+    notify();
 
     entry.promise = generate(options, run, channel, entry).catch((error) => {
       if (!stale(run)) {
         entry.status = 'failed';
         lastRejection = `${channel}: exception`;
+        notify();
       }
       options.onError?.(channel, error);
     });
   }
+}
+
+/**
+ * Explicit user action: generate exactly one new candidate for a single channel.
+ *
+ * Does not deduplicate against the automatic brief trigger. An in-flight guard
+ * ensures one click equals one Firefly call — double-clicks and re-entrancy
+ * while pending are ignored. The previous current-run asset is retained until a
+ * new candidate passes validation.
+ */
+export function regenerateCreativeCandidate(options: RegenerateCandidateOptions): RegenerateCandidateResult {
+  beginCreativeRun(options.runId);
+  const run = activeRun;
+  if (!run || run.runId !== options.runId) return { started: false, reason: 'no-run' };
+
+  const existing = run.entries.get(options.channel);
+  if (existing?.status === 'pending') return { started: false, reason: 'pending' };
+
+  const entry: ChannelEntry = {
+    status: 'pending',
+    // Keep the previous valid asset on screen until a replacement promotes.
+    asset: existing?.asset ?? null,
+    promise: Promise.resolve(),
+    lastAttemptToken: options.attemptToken,
+    manualRegenCount: (existing?.manualRegenCount ?? 0) + 1,
+  };
+  run.entries.set(options.channel, entry);
+  notify();
+
+  entry.promise = generate(options, run, options.channel, entry).catch((error) => {
+    if (!stale(run)) {
+      entry.status = 'failed';
+      lastRejection = `${options.channel}: exception`;
+      notify();
+    }
+    options.onError?.(options.channel, error);
+  });
+
+  return { started: true, promise: entry.promise };
+}
+
+/** How many explicit manual regenerations have been started for a channel. */
+export function manualRegenCount(channel: ImageChannel): number {
+  return activeRun?.entries.get(channel)?.manualRegenCount ?? 0;
 }
 
 /** Test-only: awaits the in-flight generations of the active run. */

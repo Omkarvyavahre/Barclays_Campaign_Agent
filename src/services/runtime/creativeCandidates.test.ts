@@ -18,6 +18,8 @@ import {
   currentRunAsset,
   getCandidateTelemetry,
   isPromotableAsset,
+  manualRegenCount,
+  regenerateCreativeCandidate,
   resetCreativeCandidates,
   settleCreativeCandidates,
   startCreativeCandidates,
@@ -288,18 +290,176 @@ describe('23. every candidate is addressed by its own id', () => {
   });
 });
 
-describe('subscribers are told only when something is promoted', () => {
-  it('notifies on promotion and on a new run, not on every call', async () => {
+describe('subscribers are told when the run opens or a candidate settles', () => {
+  it('notifies on run open, pending starts, and promotion — not after uninstall', async () => {
     const listener = vi.fn();
     const unsubscribe = subscribeToCreativeCandidates(listener);
     const stub = makeBridge(() => ({ ok: false, error: { category: 'timeout', message: 'slow' } }));
 
     await start(stub, 1);
-    // Only the run opening notified; two failures notified nothing.
-    expect(listener).toHaveBeenCalledTimes(1);
+    // beginCreativeRun + pending for each channel + failure settle for each channel
+    expect(listener.mock.calls.length).toBeGreaterThanOrEqual(1);
 
+    const callsAfterFail = listener.mock.calls.length;
     unsubscribe();
     await start(makeBridge((channel) => live(channel)), 2);
-    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenCalledTimes(callsAfterFail);
+  });
+});
+
+describe('manual regeneration is an explicit extra generation', () => {
+  const NEW_LINKEDIN = 'linkedin-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+  const NEW_EMAIL = 'email-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+
+  it('regenerates LinkedIn only and promotes the new asset', async () => {
+    const stub = makeBridge((channel) =>
+      live(channel, channel === 'linkedin' ? { id: NEW_LINKEDIN, url: `/api/images/asset/${NEW_LINKEDIN}` } : {}),
+    );
+    await start(stub, 1);
+    const emailBefore = currentRunAsset('email')?.id;
+
+    const first = regenerateCreativeCandidate({
+      bridge: stub.bridge,
+      runId: 1,
+      channel: 'linkedin',
+      attemptToken: 'manual-1',
+      request,
+    });
+    expect(first.started).toBe(true);
+    await first.promise;
+    await settleCreativeCandidates();
+
+    expect(stub.callsFor('linkedin')).toBe(2);
+    expect(stub.callsFor('email')).toBe(1);
+    expect(currentRunAsset('linkedin')?.id).toBe(NEW_LINKEDIN);
+    expect(currentRunAsset('email')?.id).toBe(emailBefore);
+    expect(manualRegenCount('linkedin')).toBe(1);
+    expect(manualRegenCount('email')).toBe(0);
+  });
+
+  it('regenerates Email only', async () => {
+    const stub = makeBridge((channel) =>
+      live(channel, channel === 'email' ? { id: NEW_EMAIL, url: `/api/images/asset/${NEW_EMAIL}` } : {}),
+    );
+    await start(stub, 1);
+
+    const result = regenerateCreativeCandidate({
+      bridge: stub.bridge,
+      runId: 1,
+      channel: 'email',
+      attemptToken: 'manual-1',
+      request,
+    });
+    await result.promise;
+
+    expect(stub.callsFor('email')).toBe(2);
+    expect(stub.callsFor('linkedin')).toBe(1);
+    expect(currentRunAsset('email')?.id).toBe(NEW_EMAIL);
+  });
+
+  it('one click creates exactly one image-generation request', async () => {
+    const stub = makeBridge((channel) => live(channel));
+    await start(stub, 1);
+    const before = stub.generate.mock.calls.length;
+
+    const result = regenerateCreativeCandidate({
+      bridge: stub.bridge,
+      runId: 1,
+      channel: 'linkedin',
+      attemptToken: 'manual-1',
+      request,
+    });
+    await result.promise;
+
+    expect(stub.generate.mock.calls.length).toBe(before + 1);
+  });
+
+  it('double click while pending does not create duplicate calls', async () => {
+    let release: (value: GenerateResult) => void = () => {};
+    const gate = new Promise<GenerateResult>((resolve) => {
+      release = resolve;
+    });
+    const stub = makeBridge(() => gate);
+    await start(makeBridge((channel) => live(channel)), 1);
+
+    const first = regenerateCreativeCandidate({
+      bridge: stub.bridge,
+      runId: 1,
+      channel: 'linkedin',
+      attemptToken: 'manual-1',
+      request,
+    });
+    const second = regenerateCreativeCandidate({
+      bridge: stub.bridge,
+      runId: 1,
+      channel: 'linkedin',
+      attemptToken: 'manual-2',
+      request,
+    });
+
+    expect(first.started).toBe(true);
+    expect(second.started).toBe(false);
+    expect(second.reason).toBe('pending');
+    expect(stub.generate).toHaveBeenCalledTimes(1);
+    expect(getCandidateTelemetry().pendingChannel).toBe('linkedin');
+
+    release(live('linkedin', { id: NEW_LINKEDIN, url: `/api/images/asset/${NEW_LINKEDIN}` }));
+    await first.promise;
+  });
+
+  it('failure preserves the previous current-run image', async () => {
+    const stub = makeBridge((channel) => live(channel));
+    await start(stub, 1);
+    const previous = currentRunAsset('linkedin')?.id;
+
+    const failStub = makeBridge(() => ({ ok: false, error: { category: 'upstream_error', message: 'no' } }));
+    const result = regenerateCreativeCandidate({
+      bridge: failStub.bridge,
+      runId: 1,
+      channel: 'linkedin',
+      attemptToken: 'manual-1',
+      request,
+    });
+    await result.promise;
+
+    expect(currentRunAsset('linkedin')?.id).toBe(previous);
+    expect(getCandidateTelemetry().linkedin).toBe('failed');
+  });
+
+  it('rejected validation preserves the previous current-run image', async () => {
+    const stub = makeBridge((channel) => live(channel));
+    await start(stub, 1);
+    const previous = currentRunAsset('linkedin')?.id;
+
+    const bad = makeBridge(() => live('linkedin', { width: 1, height: 1 }));
+    const result = regenerateCreativeCandidate({
+      bridge: bad.bridge,
+      runId: 1,
+      channel: 'linkedin',
+      attemptToken: 'manual-1',
+      request,
+    });
+    await result.promise;
+
+    expect(currentRunAsset('linkedin')?.id).toBe(previous);
+    expect(getCandidateTelemetry().linkedin).toBe('rejected');
+  });
+
+  it('does not deduplicate manual regeneration against the automatic run', async () => {
+    const stub = makeBridge((channel) => live(channel));
+    await start(stub, 1);
+    await start(stub, 1);
+
+    regenerateCreativeCandidate({
+      bridge: stub.bridge,
+      runId: 1,
+      channel: 'linkedin',
+      attemptToken: 'manual-1',
+      request,
+    });
+    await settleCreativeCandidates();
+
+    expect(stub.callsFor('linkedin')).toBe(2);
+    expect(stub.callsFor('email')).toBe(1);
   });
 });

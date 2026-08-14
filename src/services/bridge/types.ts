@@ -130,6 +130,11 @@ export interface ImageRequestPayload {
   channel: ImageChannel;
   campaignContext: CampaignImageContext;
   outputContext: OutputImageContext;
+  /**
+   * Optional deterministic identity for explicit manual regeneration. Absent on
+   * the automatic one-per-channel brief trigger so composition stays unchanged.
+   */
+  compositionIdentity?: string;
 }
 
 /** An app-relative URL only. No provider URL, filesystem path or upload id. */

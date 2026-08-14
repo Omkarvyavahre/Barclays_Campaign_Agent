@@ -3,7 +3,8 @@ import { V19_MARKUP } from '../runtime/v19Markup';
 import { V19_SCRIPTS } from '../runtime/scriptManifest';
 import { installBrowserBridge } from '../services/bridge/browserBridge';
 import { installCampaignCreative } from '../services/runtime/campaignCreative';
-import { installV19Adapter } from '../services/runtime/v19Adapter';
+import { installCreativeEditAdapter } from '../services/runtime/creativeEditAdapter';
+import { getLastAppliedBrief, installV19Adapter } from '../services/runtime/v19Adapter';
 
 /**
  * Preservation-first React host for the V19 campaign demo.
@@ -21,6 +22,7 @@ export function V19Runtime() {
     const mountedScripts: HTMLScriptElement[] = [];
     let uninstallAdapter: (() => void) | undefined;
     let uninstallCreative: (() => void) | undefined;
+    let uninstallEdit: (() => void) | undefined;
 
     const loadScripts = async () => {
       // The DOM must exist before the first V19 script executes.
@@ -57,6 +59,14 @@ export function V19Runtime() {
         onError: (error) => console.error('[V19 creative]', error),
       });
 
+      // Injects "Regenerate creative" into the Stage 7 edit modal without
+      // touching frozen V19 artifacts or the GenStudio save path.
+      uninstallEdit = installCreativeEditAdapter({
+        bridge,
+        getAppliedBrief: getLastAppliedBrief,
+        onError: (error) => console.error('[V19 creative edit]', error),
+      });
+
       setReady(true);
     };
 
@@ -66,6 +76,7 @@ export function V19Runtime() {
 
     return () => {
       cancelled = true;
+      uninstallEdit?.();
       uninstallCreative?.();
       uninstallAdapter?.();
       for (const script of mountedScripts) script.remove();

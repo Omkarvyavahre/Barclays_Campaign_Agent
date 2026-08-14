@@ -31,6 +31,7 @@ export const imageRequestValidator = strictObject({
   channel: literalUnion(IMAGE_CHANNELS),
   campaignContext: campaignContextValidator,
   outputContext: outputContextValidator,
+  compositionIdentity: optional(string({ min: 1, max: 200 })),
 });
 
 export function validateImageRequest(input: unknown): ValidationResult<ImageGenerationRequest> {

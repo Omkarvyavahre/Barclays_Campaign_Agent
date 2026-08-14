@@ -80,9 +80,16 @@ interface Session {
 const telemetry: AdapterTelemetry = { coordinator: 'idle', brief: 'idle', pending: false, runId: null };
 let activeSession: Session | null = null;
 let onErrorHook: ((scope: AdapterScope, error: unknown) => void) | undefined;
+/** Live brief last successfully applied; used by manual creative regeneration. */
+let lastAppliedBrief: BriefResult | null = null;
 
 export function getAdapterTelemetry(): AdapterTelemetry {
   return { ...telemetry };
+}
+
+/** The live brief currently backing Stage 7 creative generation, if any. */
+export function getLastAppliedBrief(): BriefResult | null {
+  return lastAppliedBrief;
 }
 
 /* ------------------------------------------------------------------ *
@@ -173,6 +180,8 @@ function ensureSession(access: V19RuntimeAccess | undefined): Session {
   }
 
   activeSession = { runId, mode: null, coordinator: null, brief: null, pendingMarked: false, settled: false, disposed: false };
+  // A new run has no applied live brief until this workflow finishes.
+  lastAppliedBrief = null;
   // The creative run shares this identity, so replay retires any in-flight
   // candidate and Stage 7 returns to the approved backgrounds.
   beginCreativeRun(runId);
@@ -272,6 +281,7 @@ function applyLiveBrief(access: V19RuntimeAccess | undefined, brief: BriefResult
   const liveName = brief.campaignName;
   if (state && typeof liveName === 'string' && liveName.trim()) state.campaignName = liveName.trim();
 
+  lastAppliedBrief = brief;
   telemetry.brief = 'applied';
   return true;
 }
@@ -435,6 +445,7 @@ export function installV19Adapter({ bridge, onError }: AdapterOptions): () => vo
       clearBriefPending(access, activeSession);
     }
     activeSession = null;
+    lastAppliedBrief = null;
     resetCreativeCandidates();
     onErrorHook = undefined;
     if (originalCreation) window.startTeamsCreation = originalCreation;

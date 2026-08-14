@@ -91,6 +91,48 @@
   text-wrap: balance;
 }
 
+/* ------------------------------------------------------------------ *
+ * Stage 7 edit-modal footer: Cancel, Regenerate creative, Send update
+ *
+ * The CTA carries V19's own `.btn.primary` box, so height, radius, padding and
+ * font come from the design system and the three actions share one baseline.
+ * Only the fill is stepped back, keeping the GenStudio save dominant.
+ * ------------------------------------------------------------------ */
+
+.modal-actions .btn.bx-regenerate-creative {
+  box-sizing: border-box;
+  background: var(--navy2);
+  border-color: var(--navy2);
+  color: #fff;
+  /* Reserves the idle label's width in em, so "Regenerating…" cannot resize the
+     button at any of the responsive font-size steps. */
+  min-width: 11.6em;
+  justify-content: center;
+  white-space: nowrap;
+}
+
+.modal-actions .btn.bx-regenerate-creative:hover:not(:disabled) {
+  background: var(--navy);
+  border-color: var(--navy);
+}
+
+.modal-actions .btn.bx-regenerate-creative:disabled {
+  opacity: 0.62;
+  cursor: not-allowed;
+}
+
+/* Sits above the footer row, so the action row is never more than three buttons. */
+.bx-regenerate-status-host {
+  margin-top: 12px;
+  font-size: 10px;
+  line-height: 1.4;
+  text-align: left;
+}
+
+.bx-regenerate-status-host:empty {
+  display: none;
+}
+
 /* The email hero is shorter and narrower than the LinkedIn slot. */
 .v17-email-creative .bx-campaign-overlay {
   padding: 16px 20px 18px;

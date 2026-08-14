@@ -23,6 +23,11 @@
  * The finished prompt stays server-side; the browser never receives it.
  */
 
+import {
+  EMAIL_COMPOSITION_VARIANTS,
+  LINKEDIN_COMPOSITION_VARIANTS,
+  selectCompositionVariant,
+} from './compositionVariants.ts';
 import { ImageServiceError } from './errors.ts';
 import type {
   CampaignImageContext,
@@ -71,16 +76,14 @@ export interface ChannelPlan {
 }
 
 /** The approved LinkedIn recipe. Frozen: this is what produced the signed-off asset. */
-export const ABSTRACT_VISUAL =
-  'Premium abstract digital banking artwork on a deep navy and rich Barclays-blue background. Luminous cyan and turquoise ribbons sweep across the composition in elegant layered curves, with fine light trails and subtle depth.';
+export const ABSTRACT_VISUAL = LINKEDIN_COMPOSITION_VARIANTS[0].visual;
 
 /**
  * Neither channel may ask for a centre band with clear space above and below:
  * that reads to the model as a slide with a title area, and it filled those
  * bands with pseudo-text.
  */
-export const ABSTRACT_FRAMING =
-  'Wide composition, ribbons gathered to one side, generous clean negative space beside them.';
+export const ABSTRACT_FRAMING = LINKEDIN_COMPOSITION_VARIANTS[0].framing;
 
 /**
  * The email hero is a 190px band, so the full frame is cropped hard. Several
@@ -88,11 +91,9 @@ export const ABSTRACT_FRAMING =
  * the overlaid lockup and headline, so the email direction is deliberately
  * quieter: one ribbon, one optional trail, a single diagonal, no intersections.
  */
-export const EMAIL_VISUAL =
-  'Premium abstract artwork on a deep navy and rich Barclays-blue background. One elegant luminous cyan and turquoise ribbon sweeps smoothly from lower left to upper right, with at most one faint secondary light trail.';
+export const EMAIL_VISUAL = EMAIL_COMPOSITION_VARIANTS[0].visual;
 
-export const EMAIL_FRAMING =
-  'Single continuous diagonal flow, no crossing or converging ribbons and no bright focal knot; narrow highlights, calm dark navy negative space across the left, clean balance to the right.';
+export const EMAIL_FRAMING = EMAIL_COMPOSITION_VARIANTS[0].framing;
 
 export const CHANNEL_PLANS: Record<ImageChannel, ChannelPlan> = {
   linkedin: { size: WIDESCREEN, visual: ABSTRACT_VISUAL, framing: ABSTRACT_FRAMING },
@@ -268,13 +269,18 @@ function fitToneNote(campaign: CampaignImageContext, budget: number): string {
 /**
  * Assembles the prompt deterministically: the same context always produces the
  * same prompt, which is what makes it testable without a provider call.
+ *
+ * Automatic requests omit `compositionIdentity` and therefore always receive
+ * variant 0 (the signed-off channel recipe). Manual regeneration may supply an
+ * identity so a later click can select a different approved variant.
  */
 export function buildCreativePrompt(request: ImageGenerationRequest, referenceSlot: ReferenceSlot): PromptPlan {
-  const plan = CHANNEL_PLANS[request.channel];
+  const channelPlan = CHANNEL_PLANS[request.channel];
+  const variant = selectCompositionVariant(request.channel, request.compositionIdentity);
 
   // Visual and safety lines: emitted in full, always, and never trimmed.
   const exclusions = `No ${PROHIBITED_ELEMENTS.join(', ')} anywhere in the image.`;
-  const fixed = [plan.visual, AESTHETIC, plan.framing, ABSTRACT_RULE, REFERENCE_RULE, exclusions];
+  const fixed = [variant.visual, AESTHETIC, variant.framing, ABSTRACT_RULE, REFERENCE_RULE, exclusions];
 
   const shell = 'Tone: .';
   const note = fitToneNote(request.campaignContext, PROMPT_CHAR_LIMIT - joinedLength(fixed) - 1 - shell.length);
@@ -290,7 +296,7 @@ export function buildCreativePrompt(request: ImageGenerationRequest, referenceSl
 
   return {
     prompt,
-    size: plan.size,
+    size: channelPlan.size,
     styleStrength: DEFAULT_STYLE_STRENGTH,
     contentClass: CONTENT_CLASS,
     referenceSlot,

@@ -42,6 +42,11 @@ export interface ImageGenerationRequest {
   channel: ImageChannel;
   campaignContext: CampaignImageContext;
   outputContext: OutputImageContext;
+  /**
+   * Optional deterministic identity used only for explicit manual regeneration.
+   * When absent, the approved default composition variant is used unchanged.
+   */
+  compositionIdentity?: string;
 }
 
 /** Firefly's documented output dimensions for a channel slot. */

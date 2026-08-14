@@ -68,6 +68,22 @@ describe('the request is built from the applied brief', () => {
     );
   });
 
+  it('prefers draft modal values without requiring a save', () => {
+    const request = buildImageRequest(brief(), state(), 'linkedin', {
+      draft: { headline: 'Draft headline from modal', cta: 'Draft CTA' },
+      compositionIdentity: '7:linkedin:manual-1:abc',
+    });
+    expect(request?.outputContext).toEqual({
+      headline: 'Draft headline from modal',
+      cta: 'Draft CTA',
+    });
+    expect(request?.compositionIdentity).toBe('7:linkedin:manual-1:abc');
+  });
+
+  it('omits compositionIdentity on the automatic path', () => {
+    expect(buildImageRequest(brief(), state(), 'linkedin')?.compositionIdentity).toBeUndefined();
+  });
+
   it('falls back to the campaign name and the brief CTA before Stage 7 exists', () => {
     const request = buildImageRequest(brief(), {}, 'linkedin');
     expect(request?.outputContext).toEqual({

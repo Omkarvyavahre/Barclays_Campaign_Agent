@@ -10,6 +10,9 @@
  * Headline and CTA travel as tone context only. The server's prompt builder
  * never puts either into the prompt, and nothing readable is ever generated into
  * the image; campaign wording is composed as real HTML text in Stage 7.
+ *
+ * Manual regeneration may pass draft form values and a composition identity
+ * without changing V19 save semantics.
  */
 
 import type { BriefResult, CampaignImageContext, ImageChannel, ImageRequestPayload } from '../bridge/types';
@@ -40,6 +43,19 @@ interface V19Output {
   cta?: unknown;
 }
 
+/** Optional draft values read from the Stage 7 edit modal without saving them. */
+export interface DraftOutputContext {
+  headline?: string;
+  cta?: string;
+}
+
+export interface BuildImageRequestOptions {
+  /** Draft modal values; preferred over `state.outputs` when present and non-empty. */
+  draft?: DraftOutputContext;
+  /** Manual regeneration identity; omitted on the automatic brief trigger. */
+  compositionIdentity?: string;
+}
+
 function clean(value: unknown, max: number): string {
   return typeof value === 'string' ? value.trim().slice(0, max) : '';
 }
@@ -52,6 +68,7 @@ export function buildImageRequest(
   brief: BriefResult,
   state: V19State | undefined,
   channel: ImageChannel,
+  options: BuildImageRequestOptions = {},
 ): ImageRequestPayload | null {
   const fields = brief.fields ?? {};
 
@@ -66,8 +83,10 @@ export function buildImageRequest(
 
   const outputs = state?.outputs as Record<string, V19Output> | undefined;
   const campaignName = clean(brief.campaignName, HEADLINE_MAX);
-  const headline = clean(outputs?.[channel]?.headline, HEADLINE_MAX) || campaignName;
-  const cta = clean(outputs?.[channel]?.cta, CTA_MAX) || clean(fields.cta, CTA_MAX);
+  const draftHeadline = clean(options.draft?.headline, HEADLINE_MAX);
+  const draftCta = clean(options.draft?.cta, CTA_MAX);
+  const headline = draftHeadline || clean(outputs?.[channel]?.headline, HEADLINE_MAX) || campaignName;
+  const cta = draftCta || clean(outputs?.[channel]?.cta, CTA_MAX) || clean(fields.cta, CTA_MAX);
 
   if (!headline || !cta) return null;
 
@@ -82,5 +101,6 @@ export function buildImageRequest(
       ...(constraints ? { constraints } : {}),
     },
     outputContext: { headline, cta },
+    ...(options.compositionIdentity ? { compositionIdentity: options.compositionIdentity } : {}),
   };
 }
