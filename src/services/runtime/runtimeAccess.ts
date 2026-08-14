@@ -27,12 +27,19 @@ export interface V19TeamsMessage {
 
 export interface V19TeamsState {
   messages?: V19TeamsMessage[];
+  /** Incremented by V19 on replay/reset, so it identifies a workflow run. */
+  runId?: number;
+  authorised?: boolean;
+  generating?: boolean;
   summaryReady?: boolean;
 }
 
 export interface V19State {
   campaignName?: string;
   connections?: Record<string, boolean>;
+  /** Stage index V19 is currently generating, or null when idle. */
+  generatingStage?: number | null;
+  inlineOperationStage?: number | null;
   [key: string]: unknown;
 }
 

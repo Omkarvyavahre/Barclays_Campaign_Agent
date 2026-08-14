@@ -14,6 +14,14 @@ export const AI_ENDPOINTS = {
   brief: `${AI_API_BASE_PATH}/brief/generate`,
 } as const;
 
+export const IMAGES_API_BASE_PATH = '/api/images';
+
+export const IMAGE_ENDPOINTS = {
+  health: `${IMAGES_API_BASE_PATH}/health`,
+  generate: `${IMAGES_API_BASE_PATH}/generate`,
+  latest: `${IMAGES_API_BASE_PATH}/latest`,
+} as const;
+
 export type BridgeErrorCategory =
   | 'auth_error'
   | 'forbidden'
@@ -21,6 +29,7 @@ export type BridgeErrorCategory =
   | 'timeout'
   | 'invalid_response'
   | 'configuration_error'
+  | 'storage_error'
   | 'bad_request'
   | 'network_error';
 
@@ -93,12 +102,79 @@ export interface BriefRequestPayload {
   campaignName?: string;
 }
 
+/* ------------------------------------------------------------------ *
+ * Image generation
+ * ------------------------------------------------------------------ */
+
+export type ImageChannel = 'linkedin' | 'email';
+
+/** Accepted brief context. The server derives the creative prompt from this. */
+export interface CampaignImageContext {
+  objective: string;
+  audience: string;
+  businessNeed: string;
+  proposition: string;
+  creativeDirection: string;
+  constraints?: string;
+}
+
+/** Channel copy passed as tone context only; it is never rendered into the image. */
+export interface OutputImageContext {
+  headline: string;
+  cta: string;
+  format?: string;
+  dimensions?: string;
+}
+
+export interface ImageRequestPayload {
+  channel: ImageChannel;
+  campaignContext: CampaignImageContext;
+  outputContext: OutputImageContext;
+}
+
+/** An app-relative URL only. No provider URL, filesystem path or upload id. */
+export interface GeneratedImageAsset {
+  id: string;
+  url: string;
+  channel: ImageChannel;
+  width: number;
+  height: number;
+  bytes: number;
+}
+
+/** `source: 'mock'` always carries `asset: null`, meaning "keep the V19 creative". */
+export interface ImageOutcome {
+  source: 'mock' | 'firefly';
+  asset: GeneratedImageAsset | null;
+  referenceSlot: 1 | 2;
+  model?: string;
+  seed?: number;
+  contentClass?: string;
+}
+
+export interface ImageHealth {
+  provider: 'mock' | 'firefly';
+  credentialsConfigured: boolean;
+  referencesAvailable: boolean;
+}
+
+/** The most recent generated background for a channel, if one exists. */
+export interface LatestImage {
+  channel: ImageChannel;
+  asset: GeneratedImageAsset | null;
+}
+
 export interface BarclaysServices {
   readonly version: string;
   health(): Promise<BridgeResponse<AiHealth>>;
   agents: {
     analyseDiscussion(discussion: DiscussionContext): Promise<BridgeResponse<AgentOutcome<CoordinatorResult>>>;
     generateBrief(request: BriefRequestPayload): Promise<BridgeResponse<AgentOutcome<BriefResult>>>;
+  };
+  images: {
+    health(): Promise<BridgeResponse<ImageHealth>>;
+    generate(request: ImageRequestPayload): Promise<BridgeResponse<ImageOutcome>>;
+    latest(channel: ImageChannel): Promise<BridgeResponse<LatestImage>>;
   };
 }
 

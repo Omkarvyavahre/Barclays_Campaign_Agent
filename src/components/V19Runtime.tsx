@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { V19_MARKUP } from '../runtime/v19Markup';
 import { V19_SCRIPTS } from '../runtime/scriptManifest';
 import { installBrowserBridge } from '../services/bridge/browserBridge';
+import { installCampaignCreative } from '../services/runtime/campaignCreative';
 import { installV19Adapter } from '../services/runtime/v19Adapter';
 
 /**
@@ -19,6 +20,7 @@ export function V19Runtime() {
     let cancelled = false;
     const mountedScripts: HTMLScriptElement[] = [];
     let uninstallAdapter: (() => void) | undefined;
+    let uninstallCreative: (() => void) | undefined;
 
     const loadScripts = async () => {
       // The DOM must exist before the first V19 script executes.
@@ -48,6 +50,13 @@ export function V19Runtime() {
         onError: (scope, error) => console.error(`[V19 adapter:${scope}]`, error),
       });
 
+      // Composes the Stage 7 LinkedIn creative from an already-generated
+      // background. A no-op when none exists, so V19 renders unchanged.
+      uninstallCreative = installCampaignCreative({
+        bridge,
+        onError: (error) => console.error('[V19 creative]', error),
+      });
+
       setReady(true);
     };
 
@@ -57,6 +66,7 @@ export function V19Runtime() {
 
     return () => {
       cancelled = true;
+      uninstallCreative?.();
       uninstallAdapter?.();
       for (const script of mountedScripts) script.remove();
     };

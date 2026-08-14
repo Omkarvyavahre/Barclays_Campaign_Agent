@@ -29,6 +29,25 @@ const FORBIDDEN_TOKENS = [
   'loadAiConfig',
   'requestStructuredCompletion',
   'assertLiveConfig',
+  // Adobe Firefly: credentials, endpoints, and server-only implementation.
+  'ADOBE_FIREFLY_CLIENT_ID',
+  'ADOBE_FIREFLY_CLIENT_SECRET',
+  'ADOBE_FIREFLY_API_BASE_URL',
+  'ADOBE_IMS_BASE_URL',
+  'ADOBE_FIREFLY_SCOPE',
+  'IMAGE_GENERATION_PROVIDER',
+  'firefly-api.adobe.io',
+  'ims-na1.adobelogin.com',
+  '/v2/storage/image',
+  '/v3/images/generate',
+  'client_credentials',
+  'firefly-references',
+  'loadImageConfig',
+  'requestAccessToken',
+  'uploadReferenceImage',
+  'buildCreativePrompt',
+  'saveGeneratedImage',
+  '.generated/firefly',
 ];
 
 const CLIENT_SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx']);
@@ -112,6 +131,13 @@ describe('built client bundle contains no server-only material', () => {
     expect(js.some((contents) => contents.includes('/api/ai'))).toBe(true);
     expect(js.some((contents) => contents.includes('/coordinator/analyse'))).toBe(true);
     expect(js.some((contents) => contents.includes('/brief/generate'))).toBe(true);
+    expect(js.some((contents) => contents.includes('/api/images'))).toBe(true);
     expect(js.some((contents) => /https?:\/\/[^"'`\s]*gateway/i.test(contents))).toBe(false);
+    expect(js.some((contents) => /https?:\/\/[^"'`\s]*adobe/i.test(contents))).toBe(false);
+  });
+
+  it.runIf(builtAssets.length > 0)('emits no Adobe or gateway hostname into any built asset', () => {
+    const offenders = builtAssets.filter((file) => /adobelogin|adobe\.io|firefly-api/i.test(readFileSync(file, 'utf8')));
+    expect(offenders.map((file) => relative(ROOT, file))).toEqual([]);
   });
 });

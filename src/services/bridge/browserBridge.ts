@@ -9,6 +9,7 @@
 
 import {
   AI_ENDPOINTS,
+  IMAGE_ENDPOINTS,
   type AgentOutcome,
   type AiHealth,
   type BarclaysServices,
@@ -18,6 +19,11 @@ import {
   type BriefResult,
   type CoordinatorResult,
   type DiscussionContext,
+  type ImageChannel,
+  type ImageHealth,
+  type ImageOutcome,
+  type ImageRequestPayload,
+  type LatestImage,
 } from './types';
 
 export const BRIDGE_VERSION = '1.0.0';
@@ -69,6 +75,7 @@ const KNOWN_CATEGORIES: readonly string[] = [
   'timeout',
   'invalid_response',
   'configuration_error',
+  'storage_error',
   'bad_request',
   'network_error',
 ];
@@ -116,6 +123,20 @@ export function createBridge(options: BridgeOptions = {}): BarclaysServices {
       },
       generateBrief(request: BriefRequestPayload) {
         return post<AgentOutcome<BriefResult>>(AI_ENDPOINTS.brief, request, options);
+      },
+    },
+    images: {
+      health() {
+        return get<ImageHealth>(IMAGE_ENDPOINTS.health, options);
+      },
+      // Campaign context in, an app-relative asset URL out. The Firefly prompt,
+      // credentials and reference images all stay behind this endpoint.
+      generate(request: ImageRequestPayload) {
+        return post<ImageOutcome>(IMAGE_ENDPOINTS.generate, request, options);
+      },
+      // Reads back an already-generated background. Never triggers generation.
+      latest(channel: ImageChannel) {
+        return get<LatestImage>(`${IMAGE_ENDPOINTS.latest}?channel=${encodeURIComponent(channel)}`, options);
       },
     },
   };

@@ -1,6 +1,8 @@
 node_modules/
 dist/
 *.tsbuildinfo
+# Generated image output. Never source-controlled, never served as a static asset.
+.generated/
 .env
 .env.*
 !.env.example
