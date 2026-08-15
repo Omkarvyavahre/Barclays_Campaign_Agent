@@ -1,10 +1,28 @@
-import { useEffect, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import { V19_MARKUP } from '../runtime/v19Markup';
 import { V19_SCRIPTS } from '../runtime/scriptManifest';
-import { installBrowserBridge } from '../services/bridge/browserBridge';
-import { installCampaignCreative } from '../services/runtime/campaignCreative';
-import { installCreativeEditAdapter } from '../services/runtime/creativeEditAdapter';
-import { getLastAppliedBrief, installV19Adapter } from '../services/runtime/v19Adapter';
+import {
+  readPeopleSnapshot,
+  setLegacyPeopleOpen,
+  subscribeToPeopleSnapshot,
+  type PeopleSnapshot
+} from '../runtime/peopleBridge';
+import { PeopleToggleButton } from './PeopleToggleButton';
+
+const V19_HTML = { __html: V19_MARKUP };
+
+/**
+ * Mounts the V19 DOM once and never re-renders.
+ *
+ * Re-rendering this element makes React rebuild the whole injected subtree,
+ * which would discard the running Teams playback DOM and any node the runtime
+ * or a portal is holding on to. State that affects the V19 layout therefore
+ * lives on the wrapper below, never on this element.
+ */
+const V19Markup = memo(function V19Markup({ hostRef }: { hostRef: RefObject<HTMLDivElement | null> }) {
+  return <div id="v19-host" ref={hostRef} dangerouslySetInnerHTML={V19_HTML} />;
+});
 
 /**
  * Preservation-first React host for the V19 campaign demo.
@@ -13,16 +31,22 @@ import { getLastAppliedBrief, installV19Adapter } from '../services/runtime/v19A
  * script blocks are then loaded in their original order so inline handlers,
  * scripted Teams playback, stage rendering, comments and modal flows retain
  * the prototype's exact behavior while the app is hosted by React/Vite.
+ *
+ * React additionally owns whether the people panel is shown, at every viewport
+ * width: the header control is a React button portalled into the Teams top
+ * actions, and the collapsed/expanded layout is selected by a class on the
+ * wrapper element. The panel's contents stay rendered by the V19 runtime.
  */
 export function V19Runtime() {
   const [ready, setReady] = useState(false);
+  const [peopleOpen, setPeopleOpen] = useState(false);
+  const [participantCount, setParticipantCount] = useState<number | null>(null);
+  const [topActions, setTopActions] = useState<HTMLElement | null>(null);
+  const hostRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let cancelled = false;
     const mountedScripts: HTMLScriptElement[] = [];
-    let uninstallAdapter: (() => void) | undefined;
-    let uninstallCreative: (() => void) | undefined;
-    let uninstallEdit: (() => void) | undefined;
 
     const loadScripts = async () => {
       // The DOM must exist before the first V19 script executes.
@@ -42,32 +66,7 @@ export function V19Runtime() {
         });
       }
 
-      if (cancelled) return;
-
-      // Attached only after the runtime exists. The adapter wraps two V19
-      // entry points; it does not alter markup, styles or renderers.
-      const bridge = installBrowserBridge();
-      uninstallAdapter = installV19Adapter({
-        bridge,
-        onError: (scope, error) => console.error(`[V19 adapter:${scope}]`, error),
-      });
-
-      // Composes the Stage 7 LinkedIn creative from an already-generated
-      // background. A no-op when none exists, so V19 renders unchanged.
-      uninstallCreative = installCampaignCreative({
-        bridge,
-        onError: (error) => console.error('[V19 creative]', error),
-      });
-
-      // Injects "Regenerate creative" into the Stage 7 edit modal without
-      // touching frozen V19 artifacts or the GenStudio save path.
-      uninstallEdit = installCreativeEditAdapter({
-        bridge,
-        getAppliedBrief: getLastAppliedBrief,
-        onError: (error) => console.error('[V19 creative edit]', error),
-      });
-
-      setReady(true);
+      if (!cancelled) setReady(true);
     };
 
     loadScripts().catch((error) => {
@@ -76,16 +75,43 @@ export function V19Runtime() {
 
     return () => {
       cancelled = true;
-      uninstallEdit?.();
-      uninstallCreative?.();
-      uninstallAdapter?.();
       for (const script of mountedScripts) script.remove();
     };
   }, []);
 
+  useEffect(() => {
+    setTopActions(hostRef.current?.querySelector<HTMLElement>('.teams-top-actions') ?? null);
+  }, []);
+
+  useEffect(() => {
+    const apply = (snapshot: PeopleSnapshot) => {
+      setParticipantCount(snapshot.count);
+      setPeopleOpen(snapshot.open);
+    };
+
+    const initial = readPeopleSnapshot();
+    if (initial) apply(initial);
+
+    return subscribeToPeopleSnapshot(apply);
+  }, []);
+
+  const togglePeople = useCallback(() => {
+    const next = !peopleOpen;
+    setPeopleOpen(next);
+    setLegacyPeopleOpen(next);
+  }, [peopleOpen]);
+
   return (
     <>
-      <div id="v19-host" dangerouslySetInnerHTML={{ __html: V19_MARKUP }} />
+      <div id="v19-layout" className={peopleOpen ? 'v19-people-open' : 'v19-people-closed'}>
+        <V19Markup hostRef={hostRef} />
+      </div>
+      {topActions
+        ? createPortal(
+            <PeopleToggleButton open={peopleOpen} count={participantCount} onToggle={togglePeople} />,
+            topActions
+          )
+        : null}
       <span hidden data-v19-react-ready={ready ? 'true' : 'false'} />
     </>
   );

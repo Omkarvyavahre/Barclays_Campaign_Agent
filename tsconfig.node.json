@@ -2,17 +2,17 @@
   "compilerOptions": {
     "composite": true,
     "skipLibCheck": true,
-    "target": "ES2022",
-    "lib": ["ES2023", "DOM"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "allowImportingTsExtensions": true,
+    "types": ["node"],
+    "noEmit": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "esModuleInterop": true,
-    "strict": true,
-    "noEmit": true,
-    "types": ["node"]
+    "target": "ES2022",
+    "lib": ["ES2022"]
   },
-  "include": ["vite.config.ts", "server"]
+  "include": ["vite.config.ts", "vitest.config.ts", "server/**/*.ts"]
 }

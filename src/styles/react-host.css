@@ -1,5 +1,46 @@
 /* React preservation host: display:contents avoids introducing a layout box around the V19 DOM. */
 #root,
+#v19-layout,
 #v19-host {
   display: contents;
+}
+
+/* The People control is a React button portalled into the Teams top actions. It
+   is present at every width, unlike the legacy toggle it replaces, which the
+   V19 stylesheet only revealed below 1280px. Order keeps it in the reference
+   position: chip, People, Pause, Resume, Replay, profile. */
+#v19-host .teams-top-actions > .teams-top-chip {
+  order: -2;
+}
+
+#v19-host .teams-top-actions > .v19-people-toggle {
+  order: -1;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+#v19-host .teams-top-actions > .v19-people-toggle.is-open {
+  background: rgba(255, 255, 255, 0.22);
+  border-color: rgba(255, 255, 255, 0.42);
+}
+
+/* Collapsed is the default at every width, driven only by the React
+   `peopleOpen` state. Above 1280px the V19 stylesheet reserves a 250px panel
+   column and insets the composer, so both are reverted here: the column is
+   removed rather than emptied, letting the conversation take the freed width.
+   At 1280px and below the panel is already a fixed overlay drawer that reserves
+   no width, so the runtime's own `open` class handles it. */
+@media (min-width: 1281px) {
+  #v19-layout.v19-people-closed .teams-people {
+    display: none !important;
+  }
+
+  #v19-layout.v19-people-closed .teams-shell {
+    grid-template-columns: 62px 220px minmax(0, 1fr) !important;
+  }
+
+  #v19-layout.v19-people-closed .teams-composer-wrap {
+    right: 0 !important;
+  }
 }

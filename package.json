@@ -6,23 +6,25 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "typecheck": "tsc -b",
-    "test": "vitest run",
-    "ai:inspect": "node server/inspect.ts",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "typecheck": "tsc -b && tsc -p tsconfig.server.json",
+    "test": "vitest run"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
     "react": "latest",
     "react-dom": "latest",
+    "sharp": "^0.35.3",
     "typescript": "latest",
     "vite": "latest"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "^26.2.0",
     "@types/react": "latest",
     "@types/react-dom": "latest",
-    "happy-dom": "^20.11.2",
+    "jsdom": "^30.0.1",
     "vitest": "^4.1.10"
   }
 }
