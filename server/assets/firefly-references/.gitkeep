@@ -1,3 +1,0 @@
-Server-side Firefly reference inputs only.
-These files are read by server code; they must never be served to the browser
-or copied into public/, src/assets/ or dist/.

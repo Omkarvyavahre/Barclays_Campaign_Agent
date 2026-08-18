@@ -19,12 +19,6 @@
     state.activities.unshift('Opened the campaign brief created from the UKC Pod discussion and connected sources');
     renderAll({scrollToStage:1});
     requestAnimationFrame(function(){
-      const chat=document.getElementById('chatScroll');
-      const brief=document.getElementById('conversation-stage-1');
-      if(chat&&brief){
-        const top=Math.max(0,brief.offsetTop-18);
-        chat.scrollTo({top:top,behavior:'auto'});
-      }
       const a=stageAgent(1),name=document.querySelector('.agent-name'),sub=document.querySelector('.agent-sub');
       if(name)name.textContent=a.name;if(sub)sub.textContent=a.sub;
     });

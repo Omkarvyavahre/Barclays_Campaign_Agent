@@ -1,8 +1,12 @@
 node_modules/
 dist/
-*.tsbuildinfo
-# Generated image output. Never source-controlled, never served as a static asset.
 .generated/
+*.tsbuildinfo
+server/ai/modify/live-firefly-checkpoint.json
+server/ai/modify/live-validation-report.json
+server/ai/creative/live-validation-report.json
+server/ai/firefly/ims-oneshot-report.json
+server/ai/firefly/ims-diagnosis-report.json
 .env
 .env.*
 !.env.example
