@@ -24,6 +24,17 @@ export type SourceDamAssetReference = {
   mimeType?: string;
 };
 
+/** One Stage 6 channel slot that should receive a derivative of a single Firefly generation. */
+export type ChannelGenerationTarget = {
+  rootSourceDamAssetId: string;
+  channel: string;
+  format?: string;
+  dimensions?: string;
+  headline?: string;
+  copy?: string;
+  cta?: string;
+};
+
 export type ModifyAssetRequest = {
   mode: ModifyMode;
   campaignBrief: AcceptedCampaignBrief;
@@ -51,6 +62,11 @@ export type ModifyAssetRequest = {
   existingVisualReference?: PublicVisualReference | null;
   /** Firefly-only prompt submitted from the Regenerate creative modal. */
   generationPrompt?: string;
+  /**
+   * Cross-channel Add new creative: one Firefly generation, then local adaptation
+   * into each listed Stage 6 slot. Omit for single-slot / Modify paths.
+   */
+  channelTargets?: ChannelGenerationTarget[];
   /**
    * Explicit crop anchor for channel-format adaptation. Takes priority over the
    * centre default. `negativeSpace` is never used as an anchor — it describes the
@@ -122,6 +138,39 @@ export type DerivedCampaignAsset = {
   matchReason: string;
   commentsKey: string;
   version: number;
+  /** Compact KG provenance when compatible brand guidance was applied. */
+  brandGrounding?: {
+    applied: boolean;
+    entryIds: string[];
+    sources: string[];
+    ruleCount: number;
+  };
+  /**
+   * Exact owned-logo composition after Firefly generation.
+   * Distinct from brandGrounding (textual KG rules).
+   */
+  logoComposition?: {
+    applied: boolean;
+    entryId?: string;
+    sourceFile?: string;
+    placement?: 'top-left';
+    reason?: string;
+  };
+  /** Shared id for one Firefly generation distributed across channel slots. */
+  generationFamilyId?: string;
+  /** Raw / master Firefly artifact id that channel derivatives were adapted from. */
+  masterGeneratedAssetId?: string;
+  /** Same as masterGeneratedAssetId when this record is a channel derivative. */
+  derivedFromMasterGeneratedAssetId?: string;
+};
+
+export type ChannelDerivativeFailure = {
+  rootSourceDamAssetId: string;
+  channel: string;
+  dimensions?: string;
+  generationFamilyId: string;
+  masterGeneratedAssetId: string;
+  reason: string;
 };
 
 export type ModifyContentUpdate = {
@@ -139,6 +188,14 @@ export type ModifyAssetResult = {
   interpretation?: CreativeInterpretationResult;
   referenceSource?: FireflyReferenceSource | 'gemini-edit' | 'copy-only';
   derivedAsset?: DerivedCampaignAsset;
+  /**
+   * Cross-channel Add new creative: one Firefly call → one derivative per successful
+   * channel adaptation. `derivedAsset` remains the active-slot member for compat.
+   */
+  channelDerivatives?: DerivedCampaignAsset[];
+  channelDerivativeFailures?: ChannelDerivativeFailure[];
+  generationFamilyId?: string;
+  masterGeneratedAssetId?: string;
   /** Copy-only path updates Title/Description/CTA without changing the image. */
   contentUpdate?: ModifyContentUpdate;
   keepImage?: boolean;
@@ -165,6 +222,10 @@ export type ModifyAssetPublicResult = {
   interpretation?: CreativeInterpretationResult;
   referenceSource?: FireflyReferenceSource | 'gemini-edit' | 'copy-only';
   derivedAsset?: DerivedCampaignAsset;
+  channelDerivatives?: DerivedCampaignAsset[];
+  channelDerivativeFailures?: ChannelDerivativeFailure[];
+  generationFamilyId?: string;
+  masterGeneratedAssetId?: string;
   contentUpdate?: ModifyContentUpdate;
   keepImage?: boolean;
 };

@@ -36,6 +36,17 @@ export {
 export { getBrandGuardrails } from './guardrails';
 export { buildGeminiGrounding } from './grounding';
 export {
+  getCreativeGrounding,
+  toBrandGroundingMetadata
+} from './creativeGrounding';
+export type {
+  BrandGroundingMetadata,
+  CreativeGrounding,
+  CreativeGroundingProvenance,
+  CreativeGroundingQuery,
+  PublicVisualReferenceLike
+} from './creativeGrounding';
+export {
   VISUAL_FAMILIES,
   isVisualFamily,
   normalizeVisualFamily,

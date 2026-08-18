@@ -9,13 +9,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   createFireflyClient,
+  describeTransportError,
   extractFirstImageUrl,
   extractFireflyOutputs,
+  FIREFLY_CONNECT_TIMEOUT_MS,
   FIREFLY_JOB_TIMEOUT_MS,
   FIREFLY_POLL_INTERVAL_MS,
   FireflyClientError,
   normalizeFireflyJobStatus,
-  parseAsyncJobAccepted
+  parseAsyncJobAccepted,
+  resolveFireflyConnectTimeoutMs
 } from './client';
 import {
   clearGeneratedImageRegistry,
@@ -74,6 +77,29 @@ describe('Firefly async response helpers', () => {
   });
 });
 
+describe('Firefly connect budget', () => {
+  it('stays above undici’s 10s default and honours FIREFLY_CONNECT_TIMEOUT_MS', () => {
+    expect(FIREFLY_CONNECT_TIMEOUT_MS).toBeGreaterThan(10_000);
+    expect(resolveFireflyConnectTimeoutMs({} as NodeJS.ProcessEnv)).toBe(FIREFLY_CONNECT_TIMEOUT_MS);
+    expect(
+      resolveFireflyConnectTimeoutMs({ FIREFLY_CONNECT_TIMEOUT_MS: '45000' } as NodeJS.ProcessEnv)
+    ).toBe(45_000);
+    expect(
+      resolveFireflyConnectTimeoutMs({ FIREFLY_CONNECT_TIMEOUT_MS: 'not-a-number' } as NodeJS.ProcessEnv)
+    ).toBe(FIREFLY_CONNECT_TIMEOUT_MS);
+  });
+
+  it('flattens a fetch cause chain into one sanitized line', () => {
+    const error = new TypeError('fetch failed', {
+      cause: Object.assign(new Error('Connect Timeout Error'), { code: 'UND_ERR_CONNECT_TIMEOUT' })
+    });
+    expect(describeTransportError(error)).toBe(
+      'fetch failed <- UND_ERR_CONNECT_TIMEOUT: Connect Timeout Error'
+    );
+    expect(describeTransportError(new Error('socket hang up'))).toBe('socket hang up');
+  });
+});
+
 describe('createFireflyClient async polling', () => {
   let tempDir: string;
 
@@ -95,6 +121,72 @@ describe('createFireflyClient async polling', () => {
     });
     return { fetchImpl: fetchImpl as unknown as typeof fetch, calls };
   }
+
+  it('classifies an IMS transport failure instead of surfacing a bare fetch error', async () => {
+    // undici rejects with `TypeError: fetch failed` when the TLS handshake cannot complete,
+    // which on an inspecting corporate network means Node lacks the OS trust store.
+    const fetchImpl = vi.fn(async (_input: string | URL | Request) => {
+      void _input;
+      throw new TypeError('fetch failed');
+    });
+    const client = createFireflyClient({
+      live: true,
+      clientId: 'cid',
+      clientSecret: 'sec',
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    await expect(client.generateImage({ prompt: 'a premium abstract visual' })).rejects.toThrow(
+      FireflyClientError
+    );
+    await expect(
+      client.generateImage({ prompt: 'a premium abstract visual' })
+    ).rejects.toMatchObject({ code: 'ims_unreachable' });
+
+    const error = await client
+      .generateImage({ prompt: 'a premium abstract visual' })
+      .then(() => null)
+      .catch((e: FireflyClientError) => e);
+    expect(error?.message).toContain('Firefly IMS request failed before any HTTP response');
+    expect(error?.message).toContain('--use-system-ca');
+    // Only the IMS token call is attempted; no generation request is made.
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toContain('ims-na1.adobelogin.com');
+  });
+
+  it('names the undici cause when the generation request dies before any HTTP response', async () => {
+    // Regression: corporate egress reaches firefly-api.adobe.io in ~8s, so jitter past undici's
+    // 10s default connect timeout produced an undiagnosable bare `fetch failed`.
+    const { fetchImpl, calls } = mockFetchSequence([
+      () => jsonResponse({ access_token: 'tok-1', expires_in: 86000 }),
+      () => {
+        throw new TypeError('fetch failed', {
+          cause: Object.assign(new Error('Connect Timeout Error'), {
+            code: 'UND_ERR_CONNECT_TIMEOUT'
+          })
+        });
+      }
+    ]);
+    const client = createFireflyClient({
+      live: true,
+      clientId: 'cid',
+      clientSecret: 'sec',
+      fetchImpl,
+      connectTimeoutMs: 30_000
+    });
+
+    const error = await client
+      .generateImage({ prompt: 'a premium abstract visual' })
+      .then(() => null)
+      .catch((e: FireflyClientError) => e);
+
+    expect(error?.code).toBe('generate_request_failed');
+    expect(error?.message).toContain('UND_ERR_CONNECT_TIMEOUT');
+    expect(error?.message).toContain('30000 ms');
+    // IMS succeeded first; the failure is the generate call, not auth.
+    expect(calls[0]?.url).toContain('ims-na1.adobelogin.com');
+    expect(calls[1]?.url).toContain('/v3/images/generate-async');
+  });
 
   it('accepts initial async response without outputs and polls pending → succeeded', async () => {
     tempDir = mkdtempSync(join(tmpdir(), 'ff-poll-'));

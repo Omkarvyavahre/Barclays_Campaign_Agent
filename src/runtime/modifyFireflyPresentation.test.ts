@@ -15,6 +15,10 @@ const BRIDGE_SOURCE = readFileSync(
 
 type AnyRecord = Record<string, unknown>;
 
+const DAM_SOURCE_IMAGE = '/assets/iportal-creative-single.png';
+const MOBILE_SOURCE_IMAGE = '/assets/iportal-creative-linkedin-mobile.png';
+const WEB_SOURCE_IMAGE = '/assets/iportal-creative-linkedin-web.png';
+
 const escape = (v: unknown) =>
   String(v).replace(
     /[&<>"']/g,
@@ -47,22 +51,28 @@ function linkedInAsset(overrides: AnyRecord = {}): AnyRecord {
   };
 }
 
+// Slots own their visual, mirroring the shipped records: each channel format carries
+// its own dedicated preloaded creative.
 function baseAssets(): AnyRecord[] {
   return [
     linkedInAsset({
       id: 'DAM-0188',
       requirement: 'LinkedIn sponsored content — mobile',
-      format: 'Sponsored content · mobile crop'
+      format: 'Sponsored content · mobile crop',
+      imageUrl: MOBILE_SOURCE_IMAGE
     }),
     linkedInAsset({
       id: 'REQ-LI-WEB',
-      name: 'LinkedIn web creative',
+      name: 'iPortal step-change web creative',
       requirement: 'LinkedIn sponsored content — web',
       format: 'Sponsored content · web',
       dimensions: '1200 × 627',
-      found: false,
-      sourceType: 'Requirement',
-      commentsKey: 'dam-linkedin-web'
+      found: true,
+      sourceType: 'Adobe DAM',
+      matchStatus: 'Adaptation recommended',
+      confidence: '83%',
+      commentsKey: 'dam-linkedin-web',
+      imageUrl: WEB_SOURCE_IMAGE
     }),
     linkedInAsset({
       id: 'DAM-0231',
@@ -71,7 +81,8 @@ function baseAssets(): AnyRecord[] {
       channel: 'Email',
       format: 'Email activation banner',
       dimensions: '1200 × 600',
-      commentsKey: 'dam-email'
+      commentsKey: 'dam-email',
+      imageUrl: DAM_SOURCE_IMAGE
     })
   ];
 }
@@ -124,7 +135,7 @@ function installGlobals(assets: AnyRecord[]) {
   g.damPreview = (a: AnyRecord) =>
     `<div class="clean-creative asset-crop-right" style="background-image:url('${String(a.id)}')"></div>`;
   g.renderAssets = () => '';
-  g.IPORTAL_CREATIVE = 'data:image/png;base64,IPORTALCREATIVEUNDERTEST';
+  g.IPORTAL_CREATIVE = '/assets/iportal-creative-single.png';
   g.openExternalApprovalRequest = () => {};
 
   document.body.innerHTML = `
@@ -208,6 +219,13 @@ function mockDerivativeResponse(id: string, overrides: AnyRecord = {}) {
             requestedChange: 'Make the background darker and simplify the composition'
           },
           version: 1,
+          approval: 'Brand guidance applied',
+          brandGrounding: {
+            applied: true,
+            entryIds: ['gr-owned-logo-assets'],
+            sources: ['Barclays-Logo.wine.svg'],
+            ruleCount: 1
+          },
           ...overrides
         },
         interpretation: { visualReference: null }
@@ -286,7 +304,7 @@ describe('generated assets replace the current asset in place', () => {
     );
   });
 
-  it('renders no Original / AI-modified candidate selector', async () => {
+  it('renders Original and Modified candidates after modify, without Modified 2', async () => {
     const g = installGlobals(baseAssets());
     mockDerivativeResponse('FF-DER-ABC1234567');
     await modify(g, 0);
@@ -294,12 +312,16 @@ describe('generated assets replace the current asset in place', () => {
     await modify(g, 0);
 
     const root = renderAssetDom(g);
-    expect(root.querySelectorAll('.v19-candidate-tabs')).toHaveLength(0);
+    const labels = [...root.querySelectorAll('.v19-variant-label')].map((node) => node.textContent);
+    expect(labels).toEqual(['Original', 'Modified']);
+    expect(root.textContent).not.toContain('Modified 2');
     expect(root.textContent).not.toContain('AI-modified 2');
-    expect(
-      [...root.querySelectorAll('button')].map((node) => node.textContent)
-    ).not.toContain('Original');
-    expect((g as AnyRecord).setAssetCandidate).toBeUndefined();
+    expect(root.textContent).not.toContain('Generated');
+    expect(typeof (g as AnyRecord).selectAssetCandidate).toBe('function');
+    expect(assets(g)[0].id).toBe('DAM-0188');
+    expect(assets(g)[0].imageUrl).toBe(MOBILE_SOURCE_IMAGE);
+    expect((assets(g)[0].modifiedCandidate as AnyRecord).id).toBe('FF-DER-DEF7654321');
+    expect(assets(g)[0].selectedCandidateKind).toBe('modified');
   });
 
   it('drops the Recommendation block for generated assets but keeps it for DAM matches', async () => {
@@ -315,15 +337,20 @@ describe('generated assets replace the current asset in place', () => {
     expect(root.textContent).not.toContain('Gemini Creative Interpreter validated');
   });
 
-  it('replaces the LinkedIn mobile creative in place and leaves web and email alone', async () => {
+  it('keeps Original intact and adds a Modified candidate for LinkedIn mobile only', async () => {
     const g = installGlobals(baseAssets());
     mockDerivativeResponse('FF-DER-ABC1234567');
 
     await modify(g, 0);
 
     const [mobile, web, email] = assets(g);
-    expect(mobile.id).toBe('FF-DER-ABC1234567');
-    expect(mobile.imageUrl).toBe('/api/ai/generated/ff-test-ff-der-abc1234567');
+    expect(mobile.id).toBe('DAM-0188');
+    expect(mobile.imageUrl).toBe(MOBILE_SOURCE_IMAGE);
+    expect(mobile.selectedCandidateKind).toBe('modified');
+    expect((mobile.modifiedCandidate as AnyRecord).id).toBe('FF-DER-ABC1234567');
+    expect((mobile.modifiedCandidate as AnyRecord).imageUrl).toBe(
+      '/api/ai/generated/ff-test-ff-der-abc1234567'
+    );
     // Visual-only Modify keeps campaign copy unchanged on the slot.
     expect(mobile.headline).toBe('Discover what is possible with iPortal');
     expect(mobile.copy).toBe('Self-serve more of your day-to-day banking.');
@@ -334,18 +361,21 @@ describe('generated assets replace the current asset in place', () => {
     expect(mobile.commentsKey).toBe('dam-mobile');
 
     expect(web.id).toBe('REQ-LI-WEB');
-    expect(web.imageUrl).toBeUndefined();
+    expect(web.imageUrl).toBe(WEB_SOURCE_IMAGE);
+    expect(web.modifiedCandidate).toBeNull();
     expect(email.id).toBe('DAM-0231');
-    expect(email.imageUrl).toBeUndefined();
+    expect(email.imageUrl).toBe(DAM_SOURCE_IMAGE);
+    expect(email.modifiedCandidate).toBeNull();
 
     const root = renderAssetDom(g);
     expect(root.querySelector('h3')?.textContent).toBe('LinkedIn sponsored content — mobile');
-    expect(root.querySelector('.v17-asset-preview')?.innerHTML).toContain(
+    expect(root.querySelector('.v19-variant-row.is-selected')?.textContent).toContain('Modified');
+    expect(root.querySelector('.v19-variant-row.is-selected .v19-variant-thumb')?.outerHTML).toContain(
       '/api/ai/generated/ff-test-ff-der-abc1234567'
     );
   });
 
-  it('replaces email and web slots only within their own format', async () => {
+  it('adds Modified candidates only within their own format', async () => {
     const g = installGlobals(baseAssets());
 
     mockDerivativeResponse('FF-DER-WEB0000001', {
@@ -363,11 +393,14 @@ describe('generated assets replace the current asset in place', () => {
 
     const [mobile, web, email] = assets(g);
     expect(mobile.id).toBe('DAM-0188');
-    expect(web.id).toBe('FF-DER-WEB0000001');
-    expect(web.rootSourceDamAssetId).toBe('REQ-LI-WEB');
+    expect(mobile.modifiedCandidate).toBeNull();
+    expect(web.id).toBe('REQ-LI-WEB');
+    expect((web.modifiedCandidate as AnyRecord).id).toBe('FF-DER-WEB0000001');
+    expect((web.modifiedCandidate as AnyRecord).rootSourceDamAssetId).toBe('REQ-LI-WEB');
     expect(web.requirement).toBe('LinkedIn sponsored content — web');
-    expect(email.id).toBe('FF-DER-EMAIL00001');
-    expect(email.rootSourceDamAssetId).toBe('DAM-0231');
+    expect(email.id).toBe('DAM-0231');
+    expect((email.modifiedCandidate as AnyRecord).id).toBe('FF-DER-EMAIL00001');
+    expect((email.modifiedCandidate as AnyRecord).rootSourceDamAssetId).toBe('DAM-0231');
     expect(email.requirement).toBe('Email — Email activation banner');
 
     const tabs = [...renderAssetDom(g).querySelectorAll('.v19-parent-asset-tabs > .v17-tab')].map(
@@ -380,7 +413,7 @@ describe('generated assets replace the current asset in place', () => {
     ]);
   });
 
-  it('modifies the generated image again and keeps only the newest derivative visible', async () => {
+  it('modifies the selected Modified candidate again and replaces it in place', async () => {
     const g = installGlobals(baseAssets());
     mockDerivativeResponse('FF-DER-CHAIN-001');
     await modify(g, 0);
@@ -389,7 +422,7 @@ describe('generated assets replace the current asset in place', () => {
     await modify(g, 0);
 
     const body = requestBody(second);
-    // Second edit uses the previous derivative — and its generated bytes — as the edit source.
+    // Second edit uses the previous Modified candidate — and its bytes — as the edit source.
     expect(body.editSourceAssetId).toBe('FF-DER-CHAIN-001');
     expect(body.rootSourceDamAssetId).toBe('DAM-0188');
     expect((body.sourceDamAsset as AnyRecord).id).toBe('FF-DER-CHAIN-001');
@@ -399,14 +432,18 @@ describe('generated assets replace the current asset in place', () => {
 
     const mobile = assets(g)[0];
     expect(assets(g)).toHaveLength(3);
-    expect(mobile.id).toBe('FF-DER-CHAIN-002');
-    expect(mobile.imageUrl).toBe('/api/ai/generated/ff-test-ff-der-chain-002');
-    expect(mobile.editSourceAssetId).toBe('FF-DER-CHAIN-001');
-    expect(mobile.derivedFromAssetId).toBe('FF-DER-CHAIN-001');
-    expect(mobile.rootSourceDamAssetId).toBe('DAM-0188');
-    expect(mobile.sourceAssetId).toBe('DAM-0188');
-    expect(mobile.lineage).toContain('DAM-0188');
-    expect(mobile.lineage).toContain('FF-DER-CHAIN-001');
+    expect(mobile.id).toBe('DAM-0188');
+    expect(mobile.imageUrl).toBe(MOBILE_SOURCE_IMAGE);
+    expect(mobile.selectedCandidateKind).toBe('modified');
+    expect((mobile.modifiedCandidate as AnyRecord).id).toBe('FF-DER-CHAIN-002');
+    expect((mobile.modifiedCandidate as AnyRecord).imageUrl).toBe(
+      '/api/ai/generated/ff-test-ff-der-chain-002'
+    );
+    expect((mobile.modifiedCandidate as AnyRecord).editSourceAssetId).toBe('FF-DER-CHAIN-001');
+    expect((mobile.modifiedCandidate as AnyRecord).derivedFromAssetId).toBe('FF-DER-CHAIN-001');
+    expect((mobile.modifiedCandidate as AnyRecord).rootSourceDamAssetId).toBe('DAM-0188');
+    expect(String((mobile.modifiedCandidate as AnyRecord).lineage)).toContain('DAM-0188');
+    expect(String((mobile.modifiedCandidate as AnyRecord).lineage)).toContain('FF-DER-CHAIN-001');
   });
 
   it('sends the original DAM creative as the edit source for the first modification', async () => {
@@ -418,10 +455,16 @@ describe('generated assets replace the current asset in place', () => {
     expect(body.regenerate).toBe(false);
     expect(body.editSourceAssetId).toBe('DAM-0188');
     expect(body.rootSourceDamAssetId).toBe('DAM-0188');
-    expect((body.sourceDamAsset as AnyRecord).imageUrl).toBe(
-      'data:image/png;base64,IPORTALCREATIVEUNDERTEST'
-    );
+    expect((body.sourceDamAsset as AnyRecord).imageUrl).toBe(MOBILE_SOURCE_IMAGE);
     expect(body.regenerate).toBe(false);
+  });
+
+  it('points live IPORTAL_CREATIVE at the single-panel PNG without embedded base64', () => {
+    const runtime = readFileSync(resolve(process.cwd(), 'public/runtime/v19-1.js'), 'utf8');
+    expect(runtime).toContain(
+      "const IPORTAL_CREATIVE = window.IPORTAL_CREATIVE = '/assets/iportal-creative-single.png';"
+    );
+    expect(runtime).not.toMatch(/data:image\/png;base64,/);
   });
 
   it('rejects empty modification instructions and does not offer copy-only editing', async () => {
@@ -437,7 +480,7 @@ describe('generated assets replace the current asset in place', () => {
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(assets(g)[0].id).toBe('DAM-0188');
-    expect(assets(g)[0].imageUrl).toBeUndefined();
+    expect(assets(g)[0].imageUrl).toBe(MOBILE_SOURCE_IMAGE);
     expect(assets(g)[0].cta).toBe('Explore iPortal');
     expect(toasts).toContain('Enter modification instructions');
   });
@@ -491,7 +534,7 @@ describe('generated assets replace the current asset in place', () => {
 
     expect(assets(g)[0].id).toBe('DAM-0188');
     expect(assets(g)[0].derived).toBeUndefined();
-    expect(assets(g)[0].imageUrl).toBeUndefined();
+    expect(assets(g)[0].imageUrl).toBe(MOBILE_SOURCE_IMAGE);
     expect(
       toasts.some((message) =>
         /could not preserve the creative composition/i.test(message)
@@ -520,7 +563,7 @@ describe('generated assets replace the current asset in place', () => {
 
     expect(assets(g)[0].id).toBe('DAM-0188');
     expect(assets(g)[0].derived).toBeUndefined();
-    expect(assets(g)[0].imageUrl).toBeUndefined();
+    expect(assets(g)[0].imageUrl).toBe(MOBILE_SOURCE_IMAGE);
     expect(toasts).toContain('Image editing timed out. The current asset was left unchanged.');
     // Temporary toast only — no permanent warning card on the asset.
     expect((g.renderAssets as () => string)()).not.toMatch(/timed out/i);
@@ -548,7 +591,7 @@ describe('generated assets replace the current asset in place', () => {
     expect(snapshot.id).toBe('DAM-0188');
     expect(snapshot.sourceType).toBe('Adobe DAM');
     expect(snapshot.matchStatus).toBe('Reusable');
-    expect(snapshot.imageUrl).toBeUndefined();
+    expect(snapshot.imageUrl).toBe(MOBILE_SOURCE_IMAGE);
     expect((mobile.derivativeHistory as AnyRecord[]).map((entry) => entry.id)).toEqual([
       'FF-DER-PROV-0001',
       'FF-DER-PROV-0002'
@@ -561,7 +604,15 @@ describe('generated assets replace the current asset in place', () => {
     mockDerivativeResponse('FF-DER-GOOD-0001');
     await modify(g, 0);
 
-    const before = { ...assets(g)[0] };
+    const before = {
+      id: assets(g)[0].id,
+      imageUrl: assets(g)[0].imageUrl,
+      headline: assets(g)[0].headline,
+      copy: assets(g)[0].copy,
+      cta: assets(g)[0].cta,
+      modifiedId: (assets(g)[0].modifiedCandidate as AnyRecord).id,
+      modifiedImage: (assets(g)[0].modifiedCandidate as AnyRecord).imageUrl
+    };
     mockFailedModify('generating');
     await modify(g, 0);
 
@@ -572,9 +623,11 @@ describe('generated assets replace the current asset in place', () => {
     expect(after.headline).toBe(before.headline);
     expect(after.copy).toBe(before.copy);
     expect(after.cta).toBe(before.cta);
-    expect(renderAssetDom(g).querySelector('.v17-asset-preview')?.innerHTML).toContain(
-      String(before.imageUrl)
-    );
+    expect((after.modifiedCandidate as AnyRecord).id).toBe(before.modifiedId);
+    expect((after.modifiedCandidate as AnyRecord).imageUrl).toBe(before.modifiedImage);
+    expect(
+      renderAssetDom(g).querySelector('.v19-variant-row.is-selected .v19-variant-thumb')?.outerHTML
+    ).toContain(String(before.modifiedImage));
   });
 
   it('does not replace the current asset when no generated image was persisted', async () => {
@@ -595,20 +648,35 @@ describe('generated assets replace the current asset in place', () => {
     await modify(g, 0);
 
     expect(assets(g)[0].id).toBe('DAM-0188');
-    expect(assets(g)[0].imageUrl).toBeUndefined();
+    expect(assets(g)[0].imageUrl).toBe(MOBILE_SOURCE_IMAGE);
     expect(assets(g)[0].derived).toBeUndefined();
   });
 
-  it('selects the current derivative for the campaign, not the root DAM asset', async () => {
+  it('selects the current Modified candidate for the campaign, not only the root DAM asset', async () => {
     const g = installGlobals(baseAssets());
+    (g.state as AnyRecord).outputs = {
+      linkedin: {
+        channel: 'LinkedIn',
+        headline: 'LI',
+        body: 'Body',
+        cta: 'CTA',
+        sourceAssetIds: ['DAM-0188']
+      }
+    };
     mockDerivativeResponse('FF-DER-SELECT0001');
     await modify(g, 0);
 
     (g.toggleAsset as (i: number) => void)(0);
+    (g.syncOutputsFromSelectedAssets as () => void)();
 
     const selected = assets(g).filter((asset) => asset.included);
-    expect(selected.map((asset) => asset.id)).toEqual(['FF-DER-SELECT0001']);
-    expect(selected[0].rootSourceDamAssetId).toBe('DAM-0188');
+    expect(selected.map((asset) => asset.id)).toEqual(['DAM-0188']);
+    expect(selected[0].selectedCandidateKind).toBe('modified');
+    expect((selected[0].modifiedCandidate as AnyRecord).id).toBe('FF-DER-SELECT0001');
+    expect(((g.state as AnyRecord).outputs as AnyRecord).linkedin).toMatchObject({
+      assetId: 'FF-DER-SELECT0001',
+      sourceAssetIds: ['FF-DER-SELECT0001']
+    });
     const html = (g.renderAssets as () => string)();
     expect(html).toContain('onchange="toggleAsset(0)"');
   });
@@ -620,7 +688,9 @@ describe('generated assets replace the current asset in place', () => {
     await modify(g, 0);
 
     const selected = assets(g).filter((asset) => asset.included);
-    expect(selected.map((asset) => asset.id)).toEqual(['FF-DER-KEEPSEL001']);
+    expect(selected.map((asset) => asset.id)).toEqual(['DAM-0188']);
+    expect(selected[0].selectedCandidateKind).toBe('modified');
+    expect((selected[0].modifiedCandidate as AnyRecord).id).toBe('FF-DER-KEEPSEL001');
   });
 
   it('offers Modify and Regenerate as different actions for the generated asset', async () => {
@@ -677,7 +747,7 @@ describe('generated assets replace the current asset in place', () => {
     expect(assets(g)[0].cta).toBe('Keep this CTA');
   });
 
-  it('removes Preview, threaded comments, search evidence and collaborator generation from the asset workflow', async () => {
+  it('keeps candidate Preview while removing threaded comments and collaborator generation', async () => {
     const g = installGlobals(baseAssets());
     mockDerivativeResponse('FF-DER-CLEANUI001');
     await modify(g, 0);
@@ -686,11 +756,18 @@ describe('generated assets replace the current asset in place', () => {
     const html = root.innerHTML;
     const visible = root.textContent || '';
     expect(html).toContain('>Modify asset</button>');
-    expect(html).toContain('>Regenerate creative</button>');
+    // Generation moved from the per-card row to the bottom action bar.
+    expect(html).not.toContain('>Regenerate creative</button>');
+    expect(html).toContain('>Add new creative</button>');
     expect(html).toContain('>Send for agency approval</button>');
     expect(html).toContain('Select for campaign');
     expect(html).toContain('>Accept selected assets</button>');
-    expect(html).not.toContain('>Preview</button>');
+    // Preview is candidate-specific, not a channel-level CTA.
+    expect(root.querySelectorAll('.v19-variant-row .btn')).toHaveLength(2);
+    expect(
+      [...root.querySelectorAll('.v19-variant-row .btn')].every((btn) => btn.textContent === 'Preview')
+    ).toBe(true);
+    expect(html).not.toContain("previewDamAsset(");
     expect(visible).not.toMatch(/Threaded comments/i);
     expect(visible).not.toMatch(/View search evidence|Adobe DAM search criteria/i);
     expect(visible).not.toMatch(/Generate with collaborator comments/i);
@@ -699,7 +776,7 @@ describe('generated assets replace the current asset in place', () => {
     expect(visible).not.toMatch(/Gemini|Firefly|GenStudio/i);
   });
 
-  it('opens a prompt-only Regenerate creative modal', () => {
+  it('opens a prompt-only Add new creative modal', () => {
     const g = installGlobals(baseAssets());
     (g.regenerateFireflyDerivative as (i: number) => void)(0);
 
@@ -708,12 +785,9 @@ describe('generated assets replace the current asset in place', () => {
     expect(modal.querySelectorAll('input')).toHaveLength(0);
     expect(modal.querySelector('img')).toBeNull();
     expect(modal.querySelector('.genstudio-source-preview')).toBeNull();
-    expect(modal.textContent).toContain('Regenerate creative');
-    expect(modal.textContent).toContain(
-      'Describe the new visual you want to create for this channel.'
-    );
+    expect(modal.textContent).toContain('Add new creative');
+    expect(modal.textContent).toContain('Describe the new visual you want to create');
     expect(modal.textContent).toContain('GENERATION PROMPT');
-    expect(modal.textContent).toContain('Generate creative');
     expect(modal.textContent).not.toMatch(/Firefly|Gemini|GenStudio/i);
     expect(modal.textContent).not.toMatch(/Title|Description|CTA/i);
     expect(
@@ -721,7 +795,7 @@ describe('generated assets replace the current asset in place', () => {
     ).toBe('Describe the new visual you want to generate.');
   });
 
-  it('regenerates against the current derivative and replaces it in place', async () => {
+  it('regenerates against the selected candidate and upserts Generated without removing Modified', async () => {
     const g = installGlobals(baseAssets());
     mockDerivativeResponse('FF-DER-REGEN00001');
     await modify(g, 0);
@@ -741,7 +815,16 @@ describe('generated assets replace the current asset in place', () => {
     expect(body.editSourceAssetId).toBe('FF-DER-REGEN00001');
     expect(body.rootSourceDamAssetId).toBe('DAM-0188');
     expect(assets(g)).toHaveLength(3);
-    expect(assets(g)[0].id).toBe('FF-DER-REGEN00002');
+    expect(assets(g)[0].id).toBe('DAM-0188');
+    expect(assets(g)[0].imageUrl).toBe(MOBILE_SOURCE_IMAGE);
+    expect((assets(g)[0].modifiedCandidate as AnyRecord).id).toBe('FF-DER-REGEN00001');
+    expect((assets(g)[0].generatedCandidate as AnyRecord).id).toBe('FF-DER-REGEN00002');
+    expect(assets(g)[0].selectedCandidateKind).toBe('generated');
+
+    const labels = [...renderAssetDom(g).querySelectorAll('.v19-variant-label')].map(
+      (node) => node.textContent
+    );
+    expect(labels).toEqual(['Original', 'Modified', 'Generated']);
   });
 
   it('renders the generated creative in the full preview slot with a cover crop', () => {
@@ -759,8 +842,8 @@ describe('generated assets replace the current asset in place', () => {
     expect(markup).toContain('background-size:cover');
     expect(markup).toContain('background-position:right center');
     expect(markup).toContain('background-repeat:no-repeat');
+    expect(markup).toContain('--v19-creative-ratio:1080 / 1080');
     expect(markup).not.toContain('dam-thumb');
-    expect(markup).not.toContain('1080');
   });
 
   it('previews a server-adapted creative centred, ignoring negative space', () => {
@@ -783,13 +866,13 @@ describe('generated assets replace the current asset in place', () => {
     mockDerivativeResponse('FF-DER-ABC1234567');
     await modify(g, 0);
 
-    assets(g)[0].sourceDimensions = '2048 × 2048';
+    (assets(g)[0].modifiedCandidate as AnyRecord).sourceDimensions = '2048 × 2048';
 
     const html = (g.renderAssets as () => string)();
     const visible = renderAssetDom(g).textContent || '';
     expect(html).toContain('<h3>LinkedIn sponsored content — mobile</h3>');
     expect(html).not.toContain('<h3>LinkedIn · AI-modified</h3>');
-    expect(html).toContain('AI-modified');
+    expect(html).toContain('Modified');
     expect(html).toContain('AI-assisted');
     expect(html).toContain(
       '<label>Target format</label><span>Sponsored content · mobile crop · 1080 × 1080</span>'
@@ -814,11 +897,12 @@ describe('generated assets replace the current asset in place', () => {
     await modify(g, 0);
 
     const slot = assets(g)[0]!;
+    const modified = slot.modifiedCandidate as AnyRecord;
     // The adapted crop is never presented as the source image.
-    expect(slot.sourceDimensions).toBe('1360 × 768');
-    expect(slot.finalImageDimensions).toBe('1080 × 1080');
+    expect(modified.sourceDimensions).toBe('1360 × 768');
+    expect(modified.finalImageDimensions).toBe('1080 × 1080');
     // Internal lineage still retains the real provider string.
-    expect(slot.lineage).toMatch(/Gemini image edit/);
+    expect(String(modified.lineage)).toMatch(/Gemini image edit/);
 
     const html = (g.renderAssets as () => string)();
     const visible = renderAssetDom(g).textContent || '';

@@ -3,6 +3,8 @@
  *
  * Channel-format adaptation. Pure image processing — no provider calls.
  */
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import sharp from 'sharp';
 import {
@@ -221,5 +223,133 @@ describe('adaptImageToChannelFormat', () => {
     expect(outcome.reason).toMatch(/blank band/);
     expect(outcome.sourceWidth).toBe(1360);
     expect(outcome.sourceHeight).toBe(768);
+  });
+});
+
+// Regression for the LinkedIn mobile edit that Gemini returned at 1024 × 1024 with a
+// reproduced email preheader line. The thin whitespace under that line was a false
+// positive; adapting to the 1080 × 1080 slot must now succeed, while a genuine two-panel
+// comparison must still be rejected.
+describe('LinkedIn mobile — 1080 × 1080 preheader regression', () => {
+  const TARGET = { targetWidth: 1080, targetHeight: 1080 };
+
+  /** Thin preheader line, a full-width whitespace gap, then the body — one creative. */
+  async function preheaderCreative(size = 1024) {
+    const preheader = await solid(size, 31, DEEP_BLUE);
+    const body = await solid(size, size - 75, DEEP_BLUE);
+    return sharp({ create: { width: size, height: size, channels: 3, background: WHITE } })
+      .composite([
+        { input: preheader, left: 0, top: 10 },
+        { input: body, left: 0, top: 75 }
+      ])
+      .png()
+      .toBuffer();
+  }
+
+  it('adapts a 1024 preheader-style square creative up to 1080 without rejecting it', async () => {
+    const outcome = await adaptImageToChannelFormat({
+      bytes: await preheaderCreative(),
+      sourceMime: 'image/png',
+      ...TARGET,
+      strategy: resolveCropStrategy({ negativeSpace: 'unspecified' })
+    });
+
+    expect(outcome.status).toBe('adapted');
+    if (outcome.status !== 'adapted') return;
+    expect([outcome.result.finalWidth, outcome.result.finalHeight]).toEqual([1080, 1080]);
+    expect(outcome.result.scaleMode).toBe('cover');
+  });
+
+  it('still rejects the real two-panel comparison creative shipped in public/assets', async () => {
+    const twoPanel = readFileSync(
+      resolve(process.cwd(), 'public/assets/iportal-creative.png')
+    );
+    const outcome = await adaptImageToChannelFormat({
+      bytes: twoPanel,
+      sourceMime: 'image/png',
+      ...TARGET,
+      strategy: resolveCropStrategy({ negativeSpace: 'unspecified' })
+    });
+
+    expect(outcome.status).toBe('composition-lost');
+    if (outcome.status !== 'composition-lost') return;
+    expect(outcome.validator).toBe('interior-blank-band');
+    expect(outcome.measuredBandPixels).toBeGreaterThan(outcome.thresholdBandPixels);
+  });
+});
+
+// 1200 × 480 is the widest campaign slot (2.5:1) and the least forgiving crop.
+describe('Email activation banner — 1200 × 480', () => {
+  const TARGET = { targetWidth: 1200, targetHeight: 480 };
+
+  it('cover-crops a 1360 × 768 source to exactly 1200 × 480 without stretching', async () => {
+    const bytes = await horizontalRamp(1360, 768);
+    const outcome = await adaptImageToChannelFormat({
+      bytes,
+      sourceMime: 'image/png',
+      ...TARGET,
+      strategy: resolveCropStrategy({ negativeSpace: 'left' })
+    });
+
+    expect(outcome.status).toBe('adapted');
+    if (outcome.status !== 'adapted') return;
+    const { result } = outcome;
+    expect([result.finalWidth, result.finalHeight]).toEqual([1200, 480]);
+    expect(result.scaleMode).toBe('cover');
+    expect(result.sourceWidth).toBe(1360);
+    expect(result.sourceHeight).toBe(768);
+
+    // Uniform scale: the crop must be a window onto the source, never squashed.
+    const reference = await sharp(bytes)
+      .resize(1200, 480, { fit: 'cover', position: 'centre' })
+      .raw()
+      .toBuffer();
+    const produced = await sharp(result.bytes).raw().toBuffer();
+    expect(produced.equals(reference)).toBe(true);
+
+    // A duplicated or mirrored panel would break the monotonic ramp.
+    const reds = await middleRowReds(result.bytes);
+    for (let x = 1; x < reds.length; x += 1) {
+      expect(reds[x]!).toBeGreaterThanOrEqual(reds[x - 1]!);
+    }
+  });
+
+  it('accepts intentional copy-safe whitespace at the edge of a wide banner', async () => {
+    // Photo on the right, clean white copy area running to the left edge.
+    const photo = await horizontalRamp(700, 768);
+    const bytes = await sharp({
+      create: { width: 1360, height: 768, channels: 3, background: WHITE }
+    })
+      .composite([{ input: photo, left: 660, top: 0 }])
+      .png()
+      .toBuffer();
+
+    const outcome = await adaptImageToChannelFormat({
+      bytes,
+      sourceMime: 'image/png',
+      ...TARGET,
+      strategy: resolveCropStrategy({ negativeSpace: 'left' })
+    });
+
+    expect(outcome.status).toBe('adapted');
+    if (outcome.status !== 'adapted') return;
+    expect([outcome.result.finalWidth, outcome.result.finalHeight]).toEqual([1200, 480]);
+  });
+
+  it('still rejects a gutter that splits the banner, and reports the measurement', async () => {
+    const outcome = await adaptImageToChannelFormat({
+      bytes: await twoPanelWithWhiteGutter(),
+      sourceMime: 'image/png',
+      ...TARGET,
+      strategy: resolveCropStrategy({ negativeSpace: 'left' })
+    });
+
+    expect(outcome.status).toBe('composition-lost');
+    if (outcome.status !== 'composition-lost') return;
+    expect(outcome.validator).toBe('interior-blank-band');
+    // 2% of the 1200px axis.
+    expect(outcome.thresholdBandPixels).toBe(24);
+    expect(outcome.measuredBandPixels).toBeGreaterThan(outcome.thresholdBandPixels);
+    expect(outcome.bandPresentInSource).toBe(true);
   });
 });

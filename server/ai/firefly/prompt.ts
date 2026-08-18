@@ -29,20 +29,25 @@ const CRITICAL_NO_TEXT =
   'No readable text, pseudo-text, dashboards, UI screens, headlines, CTAs or labels.';
 const CRITICAL_NO_LOGO = 'No generated logos or simulated Barclays marks.';
 
+/**
+ * Firefly v3 generate-async accepts `photo` or `art`; omitting it lets Firefly
+ * infer from the prompt. An unclassified request must not inherit `art`.
+ */
 export function resolveFireflyContentClass(
   specification: CreativeSpecification
-): FireflyContentClass {
-  if (specification.visualFamily === 'abstract-digital' || specification.visualFamily === 'illustration') {
-    return 'art';
+): FireflyContentClass | undefined {
+  switch (specification.visualFamily) {
+    case 'abstract-digital':
+    case 'illustration':
+    case 'interface-led':
+      return 'art';
+    case 'photographic':
+    case 'lifestyle':
+    case 'product-led':
+      return 'photo';
+    default:
+      return undefined;
   }
-  if (
-    specification.visualFamily === 'photographic' ||
-    specification.visualFamily === 'lifestyle' ||
-    specification.visualFamily === 'product-led'
-  ) {
-    return 'photo';
-  }
-  return 'art';
 }
 
 function uniqueTrimmed(values: string[]): string[] {
@@ -128,9 +133,13 @@ function shortenPhrase(text: string, max: number): string {
 }
 
 function referenceStyleGuidance(referenceSource: FireflyReferenceSource): string {
-  return referenceSource === 'knowledge-graph'
-    ? 'Use the approved knowledge-graph visual reference for style guidance only; do not override the requested visual change'
-    : 'Use the currently selected asset as the edit source; preserve its overall identity while applying the requested visual change; do not override the requested visual change';
+  if (referenceSource === 'knowledge-graph') {
+    return 'Use the compatible approved visual reference as optional style support only; never override the user creative direction';
+  }
+  if (referenceSource === 'source-dam-asset') {
+    return 'Use the currently selected asset as the edit source; preserve its overall identity while applying the requested visual change; do not override the requested visual change';
+  }
+  return '';
 }
 
 type PromptBudget = {
@@ -198,6 +207,12 @@ function composeFromBudget(
   // Critical avoid rules always present (compact).
   parts.push(CRITICAL_NO_TEXT);
   parts.push(CRITICAL_NO_LOGO);
+  const brandRules = uniqueTrimmed(specification.brandGuardrails || []).slice(0, 4);
+  if (brandRules.length) {
+    parts.push(
+      `Brand guidance: ${brandRules.map((r) => shortenPhrase(r, 90)).join('; ')}`
+    );
+  }
   const avoidExtra = pickAvoid(specification.avoid, budget.avoidLimit)
     .filter((a) => !/logo|barclays mark|readable text|pseudo/i.test(a))
     .map((a) => shortenPhrase(a, 70));
@@ -213,7 +228,8 @@ function composeFromBudget(
 
   // 5. Reference-image style guidance (lowest priority; omitted first when compacting)
   if (budget.includeReference) {
-    parts.push(referenceStyleGuidance(referenceSource));
+    const reference = referenceStyleGuidance(referenceSource);
+    if (reference) parts.push(reference);
   }
 
   return joinSentences(parts);
@@ -237,11 +253,8 @@ export function measureLegacyFireflyPromptLength(input: FireflyPromptInput): num
   if (specification.accessibility.length) {
     parts.push(`Accessibility: ${specification.accessibility.join('; ')}`);
   }
-  parts.push(
-    referenceSource === 'knowledge-graph'
-      ? 'Use the approved knowledge-graph visual reference for style guidance.'
-      : 'Adapt from the currently selected asset as the edit source (modify workflow).'
-  );
+  const reference = referenceStyleGuidance(referenceSource);
+  if (reference) parts.push(reference);
   parts.push(
     'Do not render any readable marketing text, headlines, CTAs, UI labels, dashboard text, or logos. Leave clean negative space for owned brand and content composition outside generation.'
   );

@@ -34,6 +34,12 @@ export const FIREFLY_POLL_INTERVAL_MS = 1000;
 /** Maximum time to wait for an async job to reach a terminal state. */
 export const FIREFLY_JOB_TIMEOUT_MS = 60_000;
 
+/**
+ * Corporate egress reaches firefly-api.adobe.io in ~8s, and undici's 10s default
+ * connect timeout turns ordinary jitter into a bare `fetch failed`.
+ */
+export const FIREFLY_CONNECT_TIMEOUT_MS = 30_000;
+
 const PENDING_STATES = new Set(['pending', 'queued', 'running', 'processing', 'not_started', 'accepted']);
 const SUCCESS_STATES = new Set(['succeeded', 'success', 'complete', 'completed']);
 const FAILURE_STATES = new Set(['failed', 'error', 'cancelled', 'canceled']);
@@ -71,6 +77,65 @@ function resolveCredentials(options: FireflyClientOptions): {
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function resolveFireflyConnectTimeoutMs(
+  env: NodeJS.ProcessEnv = process.env
+): number {
+  const raw = Number(env.FIREFLY_CONNECT_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : FIREFLY_CONNECT_TIMEOUT_MS;
+}
+
+/**
+ * `fetch failed` carries the real reason on `cause`, which is otherwise lost.
+ * Flattens the chain into one sanitized line (codes only, never request bodies).
+ */
+export function describeTransportError(error: unknown): string {
+  const seen: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; current instanceof Error && depth < 4; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    const label = [typeof code === 'string' ? code : null, current.message]
+      .filter(Boolean)
+      .join(': ');
+    if (label && !seen.includes(label)) seen.push(label);
+    current = (current as { cause?: unknown }).cause;
+  }
+  if (!seen.length) return error instanceof Error ? error.name : String(error);
+  return seen.join(' <- ');
+}
+
+/**
+ * undici's global dispatcher cannot be reconfigured per call, so the client owns one
+ * with a wider connect budget. Loaded lazily; falls back to plain fetch if unavailable.
+ */
+function createConnectTolerantFetch(connectTimeoutMs: number): typeof fetch {
+  // undici ships its own Response/RequestInit declarations, so the bridge is untyped by design.
+  type LooseFetch = (input: unknown, init?: unknown) => Promise<unknown>;
+
+  let pending: Promise<LooseFetch | null> | null = null;
+
+  const load = async (): Promise<LooseFetch | null> => {
+    try {
+      const { Agent, fetch: undiciFetch } = await import('undici');
+      const agent = new Agent({ connect: { timeout: connectTimeoutMs } });
+      return (input, init) =>
+        (undiciFetch as unknown as LooseFetch)(input, {
+          ...((init ?? {}) as Record<string, unknown>),
+          dispatcher: agent
+        });
+    } catch {
+      return null;
+    }
+  };
+
+  const wrapped: LooseFetch = async (input, init) => {
+    pending ??= load();
+    const impl = (await pending) ?? (globalThis.fetch as unknown as LooseFetch);
+    return impl(input, init);
+  };
+
+  return wrapped as unknown as typeof fetch;
 }
 
 function sanitizeProviderSnippet(value: unknown): string {
@@ -135,11 +200,23 @@ async function fetchAccessToken(
     scope: FIREFLY_SCOPE
   });
 
-  const response = await fetchImpl(IMS_TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body
-  });
+  let response: Response;
+  try {
+    response = await fetchImpl(IMS_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body
+    });
+  } catch (error) {
+    // No HTTP response at all: transport/TLS. On a network that inspects TLS this is usually a
+    // missing OS trust store, which Node only consults with --use-system-ca.
+    const reason = describeTransportError(error);
+    throw new FireflyClientError(
+      `Firefly IMS request failed before any HTTP response (${reason}). ` +
+        'Check network reachability and Node system CA trust (--use-system-ca).',
+      'ims_unreachable'
+    );
+  }
 
   if (!response.ok) {
     const detail = await response.text().catch(() => '');
@@ -298,7 +375,8 @@ function authHeaders(accessToken: string, clientId: string): Record<string, stri
 export function createFireflyClient(options: FireflyClientOptions = {}): FireflyClient {
   const live = options.live === true || process.env.FIREFLY_LIVE === '1';
   const creds = resolveCredentials(options);
-  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const connectTimeoutMs = options.connectTimeoutMs ?? resolveFireflyConnectTimeoutMs();
+  const fetchImpl = options.fetchImpl ?? createConnectTolerantFetch(connectTimeoutMs);
   const generatedDir = options.generatedDir ?? getDefaultGeneratedDir();
   const tokenCache: { current: TokenCache | null } = { current: null };
   const pollIntervalMs = options.pollIntervalMs ?? FIREFLY_POLL_INTERVAL_MS;
@@ -365,7 +443,8 @@ export function createFireflyClient(options: FireflyClientOptions = {}): Firefly
         });
       } catch (error) {
         throw new FireflyClientError(
-          `Firefly generation request failed: ${error instanceof Error ? error.message : String(error)}`,
+          `Firefly generation request failed before any HTTP response ` +
+            `(${describeTransportError(error)}). Connect budget ${connectTimeoutMs} ms.`,
           'generate_request_failed'
         );
       }

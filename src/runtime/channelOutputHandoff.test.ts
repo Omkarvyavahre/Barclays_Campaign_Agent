@@ -45,8 +45,10 @@ const DERIVATIVE_HEADLINE = 'One connected digital front door';
 const DERIVATIVE_COPY = 'Bring payments, reporting and self-service together with iPortal.';
 const DERIVATIVE_CTA = 'Discover iPortal';
 
-// DAM-0188 · LinkedIn sponsored content — mobile. The generated creative replaces this slot.
+// DAM-0188 · LinkedIn sponsored content — mobile. Modify adds a Modified candidate under this slot.
 const LINKEDIN_SLOT_INDEX = 1;
+/** The DAM visual DAM-0188 ships with; Original must keep this after Modify. */
+const ORIGINAL_CREATIVE = '/assets/iportal-creative-linkedin-mobile.png';
 
 function globals() {
   return globalThis as unknown as AnyRecord;
@@ -70,7 +72,7 @@ function loadV19Runtime() {
   globals().renderTeams = () => {};
   // The shipped creative is a large base64 data URI; a short stand-in keeps full-page
   // renders fast. The runtime reads window.IPORTAL_CREATIVE on every render.
-  globals().IPORTAL_CREATIVE = 'data:image/png;base64,IPORTALCREATIVEUNDERTEST';
+  globals().IPORTAL_CREATIVE = '/assets/iportal-creative-single.png';
 }
 
 function mockModifyEndpoint(
@@ -121,7 +123,7 @@ function mockModifyEndpoint(
   return fetchMock;
 }
 
-/** Runs Modify on the LinkedIn mobile slot; the result replaces that slot. */
+/** Runs Modify on the LinkedIn mobile slot; the result becomes the Modified candidate. */
 async function generateDerivative(
   id = DERIVATIVE_ID,
   imageUrl = DERIVATIVE_IMAGE,
@@ -235,16 +237,18 @@ afterEach(() => {
 });
 
 describe('Stage 6 → Stage 7 Firefly derivative handoff', () => {
-  it('builds the LinkedIn channel output from the asset now occupying the slot', async () => {
+  it('builds the LinkedIn channel output from the selected Modified candidate', async () => {
     loadV19Runtime();
     const slotIndex = await generateDerivative();
 
     const slot = runtimeState().assets[slotIndex];
-    expect(slot.id).toBe(DERIVATIVE_ID);
-    expect(slot.derived).toBe(true);
-    expect(slot.generationSource).toBe('gemini-image');
-    expect(slot.imageUrl).toBe(DERIVATIVE_IMAGE);
-    expect(slot.rootSourceDamAssetId).toBe('DAM-0188');
+    expect(slot.id).toBe('DAM-0188');
+    expect(slot.imageUrl).toBe(ORIGINAL_CREATIVE);
+    expect(slot.selectedCandidateKind).toBe('modified');
+    expect((slot.modifiedCandidate as AnyRecord).id).toBe(DERIVATIVE_ID);
+    expect((slot.modifiedCandidate as AnyRecord).generationSource).toBe('gemini-image');
+    expect((slot.modifiedCandidate as AnyRecord).imageUrl).toBe(DERIVATIVE_IMAGE);
+    expect((slot.modifiedCandidate as AnyRecord).rootSourceDamAssetId).toBe('DAM-0188');
 
     selectAndAccept(slotIndex);
 
@@ -265,11 +269,10 @@ describe('Stage 6 → Stage 7 Firefly derivative handoff', () => {
     const slotIndex = await generateDerivative();
     selectAndAccept(slotIndex);
 
-    const original = String(globals().IPORTAL_CREATIVE || '');
     const markup = stageSevenLinkedInMarkup();
 
     expect(markup).toContain(DERIVATIVE_IMAGE);
-    expect(markup).not.toContain(original);
+    expect(markup).not.toContain(ORIGINAL_CREATIVE);
     expect(markup).toContain(DERIVATIVE_HEADLINE);
     expect(markup).toContain(DERIVATIVE_COPY);
     expect(markup).toContain(DERIVATIVE_CTA);
@@ -280,28 +283,29 @@ describe('Stage 6 → Stage 7 Firefly derivative handoff', () => {
     loadV19Runtime();
     selectAndAccept(LINKEDIN_SLOT_INDEX);
 
-    const original = String(globals().IPORTAL_CREATIVE || '');
     const output = linkedInOutput();
     expect(output.assetId).toBe('DAM-0188');
-    expect(output.imageUrl).toBeUndefined();
+    // The slot owns its visual, so the output carries the DAM image rather than inheriting
+    // whatever creative the renderer happened to hard-code.
+    expect(output.imageUrl).toBe(ORIGINAL_CREATIVE);
     expect(output.generated).toBe(false);
 
     const markup = stageSevenLinkedInMarkup();
-    expect(markup).toContain(original);
+    expect(markup).toContain(ORIGINAL_CREATIVE);
     expect(markup).not.toContain('/api/ai/generated/');
   });
 
-  it('refreshes an existing Stage 7 package when the accepted slot is replaced', async () => {
+  it('refreshes an existing Stage 7 package when the accepted slot gains a Modified candidate', async () => {
     loadV19Runtime();
     simulateStageSevenAlreadyGenerated();
 
-    const original = String(globals().IPORTAL_CREATIVE || '');
-    expect(stageSevenArtifact()).toContain(original);
+    expect(stageSevenArtifact()).toContain(ORIGINAL_CREATIVE);
     expect(linkedInOutput().assetId).toBe('DAM-0188');
 
-    // The replacement keeps the campaign selection that was made on the slot.
+    // The Modified candidate keeps the campaign selection that was made on the slot.
     const slotIndex = await generateDerivative();
     expect(runtimeState().assets[slotIndex].included).toBe(true);
+    expect(runtimeState().assets[slotIndex].id).toBe('DAM-0188');
 
     const output = linkedInOutput();
     expect(output.assetId).toBe(DERIVATIVE_ID);
@@ -317,11 +321,11 @@ describe('Stage 6 → Stage 7 Firefly derivative handoff', () => {
     const artifact = stageSevenArtifact();
     expect(artifact).toContain('/api/ai/generated/');
     expect(artifact).toContain(DERIVATIVE_IMAGE);
-    expect(artifact).not.toContain(original);
+    expect(artifact).not.toContain(ORIGINAL_CREATIVE);
   });
 
   it(
-    'refreshes Stage 7 again when the generated asset is modified a second time',
+    'refreshes Stage 7 again when the Modified candidate is replaced a second time',
     async () => {
       loadV19Runtime();
       simulateStageSevenAlreadyGenerated();
@@ -336,6 +340,10 @@ describe('Stage 6 → Stage 7 Firefly derivative handoff', () => {
       expect(output.imageUrl).toBe(secondImage);
       expect(output.headline).toBe('Second generated headline');
       expect(output.derivedFromAssetId).toBe('DAM-0188');
+      expect(runtimeState().assets[LINKEDIN_SLOT_INDEX].id).toBe('DAM-0188');
+      expect(
+        (runtimeState().assets[LINKEDIN_SLOT_INDEX].modifiedCandidate as AnyRecord).id
+      ).toBe('FF-DER-SECOND0001');
 
       const artifact = stageSevenArtifact();
       expect(artifact).toContain(secondImage);
@@ -366,7 +374,10 @@ describe('Stage 6 → Stage 7 Firefly derivative handoff', () => {
       globals().submitGenStudioAssetRequest as (i: number, mode: string) => Promise<void>
     )(LINKEDIN_SLOT_INDEX, 'modify');
 
-    expect(runtimeState().assets[LINKEDIN_SLOT_INDEX].id).toBe(DERIVATIVE_ID);
+    expect(runtimeState().assets[LINKEDIN_SLOT_INDEX].id).toBe('DAM-0188');
+    expect(
+      (runtimeState().assets[LINKEDIN_SLOT_INDEX].modifiedCandidate as AnyRecord).id
+    ).toBe(DERIVATIVE_ID);
     expect(linkedInOutput().assetId).toBe(DERIVATIVE_ID);
     expect(linkedInOutput().imageUrl).toBe(DERIVATIVE_IMAGE);
     expect(stageSevenLinkedInMarkup()).toContain(DERIVATIVE_IMAGE);
@@ -408,10 +419,9 @@ describe('Stage 7 channel output actions', () => {
   it('still shows each channel creative and copy alongside the reduced actions', () => {
     loadV19Runtime();
     selectAndAccept(LINKEDIN_SLOT_INDEX);
-    const original = String(globals().IPORTAL_CREATIVE || '');
 
     const linkedin = stageSevenMarkup('linkedin');
-    expect(linkedin).toContain(original);
+    expect(linkedin).toContain(ORIGINAL_CREATIVE);
     expect(linkedin).toContain(runtimeState().outputs.linkedin.headline);
 
     const email = stageSevenMarkup('email');

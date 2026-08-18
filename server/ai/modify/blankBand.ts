@@ -34,6 +34,20 @@ const BLANK_MAX_ALPHA = 8;
 const LINE_BLANK_RATIO = 0.98;
 const MIN_BAND_FRACTION = 0.02;
 const MIN_BAND_PIXELS = 8;
+/**
+ * A blank band is excused as stacked-layout whitespace (not a panel-splitting gutter)
+ * only when BOTH of these hold:
+ *   - it is thin: an email preheader/footer margin is a narrow gap, whereas a comparison
+ *     or duplicate gutter is a wide channel;
+ *   - the content on its minority side is a thin strip, not a second panel.
+ * Both are required because the channel-format adapter also tries left/right/top/bottom
+ * anchors, which can push a genuine central gutter near an edge and leave a thin sliver
+ * on one side. Measured on real outputs: a reproduced preheader margin is a ~2.3% band
+ * with ~3% content on the minority side, while genuine gutters are ~8–19% thick with
+ * ~40–46% content on each side. The cuts sit safely between the two populations.
+ */
+const MIN_SPLIT_SIDE_FRACTION = 0.12;
+const MARGIN_BAND_MAX_FRACTION = 0.05;
 /** Bounds cost on large images without resampling (which would blur band edges). */
 const MAX_SAMPLES_PER_LINE = 256;
 
@@ -71,9 +85,32 @@ function blankLineFlags(
   return flags;
 }
 
+/** Published so failure diagnostics can report measured value against threshold. */
+export const BLANK_BAND_THRESHOLDS = {
+  blankMinChannel: BLANK_MIN_CHANNEL,
+  blankMaxChannelSpread: BLANK_MAX_CHANNEL_SPREAD,
+  blankMaxAlpha: BLANK_MAX_ALPHA,
+  lineBlankRatio: LINE_BLANK_RATIO,
+  minBandFraction: MIN_BAND_FRACTION,
+  minBandPixels: MIN_BAND_PIXELS,
+  minSplitSideFraction: MIN_SPLIT_SIDE_FRACTION,
+  marginBandMaxFraction: MARGIN_BAND_MAX_FRACTION
+} as const;
+
+/** Smallest band thickness that counts as a split on an axis of `axis` pixels. */
+export function minBandLengthForAxis(axis: number): number {
+  return Math.max(MIN_BAND_PIXELS, Math.ceil(axis * MIN_BAND_FRACTION));
+}
+
+function countContentLines(flags: boolean[], from: number, to: number): number {
+  let count = 0;
+  for (let i = from; i < to; i += 1) if (flags[i] === false) count += 1;
+  return count;
+}
+
 function interiorBands(flags: boolean[], orientation: BlankBandOrientation): BlankBand[] {
   const axis = flags.length;
-  const minLength = Math.max(MIN_BAND_PIXELS, Math.ceil(axis * MIN_BAND_FRACTION));
+  const minLength = minBandLengthForAxis(axis);
   const bands: BlankBand[] = [];
   let start = -1;
 
@@ -86,10 +123,22 @@ function interiorBands(flags: boolean[], orientation: BlankBandOrientation): Bla
     if (start < 0) continue;
 
     const length = i - start;
-    const contentBefore = flags.slice(0, start).some((flag) => !flag);
-    const contentAfter = flags.slice(i).some((flag) => !flag);
-    if (length >= minLength && contentBefore && contentAfter) {
-      bands.push({ orientation, start, length, fractionOfAxis: length / axis });
+    const contentLinesBefore = countContentLines(flags, 0, start);
+    const contentLinesAfter = countContentLines(flags, i, axis);
+    const minSideFraction = Math.min(contentLinesBefore, contentLinesAfter) / axis;
+    const bandFraction = length / axis;
+    // A thin band next to a thin content strip is a stacked-layout margin (e.g. the gap
+    // under an email preheader), not a gutter between panels. Anything thicker, or with a
+    // substantial content region on both sides, is treated as a real split.
+    const isThinEdgeMargin =
+      bandFraction <= MARGIN_BAND_MAX_FRACTION && minSideFraction < MIN_SPLIT_SIDE_FRACTION;
+    if (
+      length >= minLength &&
+      contentLinesBefore > 0 &&
+      contentLinesAfter > 0 &&
+      !isThinEdgeMargin
+    ) {
+      bands.push({ orientation, start, length, fractionOfAxis: bandFraction });
     }
     start = -1;
   }

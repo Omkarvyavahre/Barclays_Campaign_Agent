@@ -12,6 +12,8 @@ import { PeopleToggleButton } from './PeopleToggleButton';
 
 const V19_HTML = { __html: V19_MARKUP };
 
+const RUNTIME_LOAD_ID = Date.now().toString(36);
+
 /**
  * Mounts the V19 DOM once and never re-renders.
  *
@@ -56,7 +58,9 @@ export function V19Runtime() {
         if (cancelled) return;
         await new Promise<void>((resolve, reject) => {
           const script = document.createElement('script');
-          script.src = src;
+          // These files live in public/ and are edited directly, so a cached copy can silently
+          // keep an older renderer alive after a change. Bust it per page load in development.
+          script.src = import.meta.env.DEV ? `${src}?v=${RUNTIME_LOAD_ID}` : src;
           script.async = false;
           script.dataset.v19Runtime = 'true';
           script.onload = () => resolve();

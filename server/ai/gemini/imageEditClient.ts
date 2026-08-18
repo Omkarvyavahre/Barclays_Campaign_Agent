@@ -259,7 +259,12 @@ async function editViaOpenAiImagesEdits(
   const ctx = contextFields(request, config);
   const prompt = buildGeminiImageEditPrompt({
     userInstruction: request.instruction,
-    guardrails: request.guardrails
+    guardrails: request.guardrails,
+    brandGuardrails: request.brandGuardrails,
+    sourceContext: {
+      channel: request.channel,
+      format: request.format
+    }
   });
   const form = new FormData();
   form.append('model', config.model);
@@ -389,7 +394,12 @@ async function editViaGoogleGenerateContent(
   const ctx = contextFields(request, config);
   const prompt = buildGeminiImageEditPrompt({
     userInstruction: request.instruction,
-    guardrails: request.guardrails
+    guardrails: request.guardrails,
+    brandGuardrails: request.brandGuardrails,
+    sourceContext: {
+      channel: request.channel,
+      format: request.format
+    }
   });
   const url = `${config.editsUrl}?key=${encodeURIComponent(config.apiKey)}`;
   const controller = new AbortController();

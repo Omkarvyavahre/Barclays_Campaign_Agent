@@ -77,6 +77,8 @@ export type CreativeSpecification = {
   preserve: string[];
   avoid: string[];
   accessibility: string[];
+  /** Compact compatible KG brand rules (optional; never invents policy). */
+  brandGuardrails?: string[];
   sourceAsset: {
     id: string;
     sourceId?: string;

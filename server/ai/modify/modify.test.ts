@@ -18,9 +18,11 @@ import {
   persistGeneratedImageBytes
 } from '../firefly';
 import {
+  inferRegenerationVisualFamily,
   modifyAsset,
   ModifyAssetError,
   toPublicModifyAssetResult,
+  type ModifyAssetOptions,
   type ModifyAssetRequest
 } from '../modify';
 
@@ -397,6 +399,53 @@ describe('Modify in GenStudio — Gemini only', () => {
     expect(toPublicModifyAssetResult(result).derivedAsset).toBeUndefined();
   });
 
+  it('reports the measured band, threshold and crop strategy behind the concise UI message', async () => {
+    const gemini = geminiEditor();
+    gemini.editImage = vi.fn(async () => ({
+      bytes: await twoPanelWithWhiteGutter(1360, 768),
+      mimeType: 'image/png',
+      model: 'mock-gemini-image-edit'
+    }));
+    let rejection: Parameters<
+      NonNullable<ModifyAssetOptions['onChannelAdaptationRejected']>
+    >[0] | null = null;
+
+    const result = await modifyAsset(
+      {
+        ...BASE_REQUEST,
+        asset: {
+          ...BASE_REQUEST.asset,
+          id: 'DAM-0231',
+          channel: 'Email',
+          format: 'HTML email hero',
+          dimensions: '1200 × 480'
+        }
+      },
+      {
+        gemini,
+        firefly: firefly(),
+        generatedDir: TEST_DIR,
+        onChannelAdaptationRejected: (meta) => {
+          rejection = meta;
+        }
+      }
+    );
+
+    expect(result.stage).toBe('unsupported');
+    expect(rejection).not.toBeNull();
+    expect(rejection!.assetId).toBe('DAM-0231');
+    expect(rejection!.channel).toBe('Email');
+    expect(rejection!.sourceDimensions).toBe('1360 × 768');
+    expect(rejection!.targetDimensions).toBe('1200 × 480');
+    expect(rejection!.cropStrategy).toBe('center');
+    expect(rejection!.validator).toBe('interior-blank-band');
+    expect(rejection!.thresholdBandPixels).toBe(24);
+    expect(rejection!.measuredBandPixels).toBeGreaterThan(24);
+    // The provider returned the split image; the crop did not create it.
+    expect(rejection!.bandPresentInSource).toBe(true);
+    expect(result.provenance.join(' ')).toMatch(/already present in the provider output/);
+  });
+
   it('returns an explicit unsupported state when image edit is not available', async () => {
     const adobe = firefly();
     const result = await modifyAsset(BASE_REQUEST, {
@@ -502,9 +551,374 @@ describe('Modify in GenStudio — Gemini only', () => {
     expect(gemini.editImage).toHaveBeenCalledTimes(1);
     expect(adobe.generateImage).not.toHaveBeenCalled();
   });
+
+  it('forwards compatible corporate KG brand guardrails into Gemini image edit', async () => {
+    const gemini = geminiEditor();
+    const result = await modifyAsset(BASE_REQUEST, {
+      gemini,
+      firefly: firefly(),
+      generatedDir: TEST_DIR
+    });
+
+    const request = gemini.editImage.mock.calls[0]![0];
+    expect(request.instruction).toBe(BASE_REQUEST.modification.prompt);
+    expect(request.guardrails).toEqual([
+      'Do not render Title, Description or CTA into the image.',
+      'Preserve the current asset identity unless the prompt explicitly requests a visual change.'
+    ]);
+    expect(request.brandGuardrails?.length).toBeGreaterThan(0);
+    const brandBlob = (request.brandGuardrails || []).join('\n');
+    expect(brandBlob).not.toMatch(/mortgage|credit.?card|personal.?loan|fresco/i);
+    expect(brandBlob).toMatch(/logo|GenStudio|GS4PM|owned/i);
+
+    expect(result.derivedAsset?.brandGrounding?.applied).toBe(true);
+    expect(result.derivedAsset?.brandGrounding?.ruleCount).toBeGreaterThan(0);
+    expect(result.derivedAsset?.approval).toBe('Brand guidance applied');
+    expect(result.provenance.some((p) => /KG brand guidance/i.test(p))).toBe(true);
+  });
 });
 
 describe('Regenerate creative — Firefly only', () => {
+  it('derives photographic direction from the user prompt and rejects an abstract inherited reference', async () => {
+    const adobe = firefly();
+    const generationPrompt =
+      'Create a premium campaign image showing realistic business professionals in a modern office with warm natural light and neutral interiors.';
+    let observed: Parameters<NonNullable<ModifyAssetOptions['onBeforeFireflyGeneration']>>[0] | null =
+      null;
+
+    const result = await modifyAsset(
+      {
+        ...regenerateRequest(generationPrompt),
+        existingVisualReference: {
+          id: 'kg-abstract-iportal',
+          title: 'Abstract iPortal visual',
+          category: 'visual-reference',
+          businessDomain: 'corporate',
+          mimeType: 'image/png',
+          tags: ['abstract', 'cyan', 'ribbons'],
+          visualFamily: 'abstract-digital'
+        }
+      },
+      {
+        gemini: geminiEditor(),
+        firefly: adobe,
+        generatedDir: TEST_DIR,
+        onBeforeFireflyGeneration: (meta) => {
+          observed = meta;
+        }
+      }
+    );
+
+    const providerRequest = adobe.generateImage.mock.calls[0]![0];
+    const prompt = providerRequest.prompt.toLowerCase();
+    expect(inferRegenerationVisualFamily(generationPrompt)).toBe('photographic');
+    expect(observed!.specification.visualFamily).toBe('photographic');
+    expect(observed!.contentClass).toBe('photo');
+    expect(observed!.referenceSource).toBe('none');
+    expect(result.referenceSource).toBe('none');
+    expect(providerRequest.referenceImage).toBeNull();
+    expect(prompt).toContain('visual family: photographic');
+    expect(prompt).toMatch(/realistic business professionals/);
+    expect(prompt).toMatch(/modern office/);
+    expect(prompt).toMatch(/warm natural light/);
+    expect(prompt).not.toMatch(/cyan ribbons?|flight[- ]?path|preserve.*abstract|visual family: abstract/);
+  });
+
+  it('reads "no illustration" as a rejection rather than a request for illustration', async () => {
+    const adobe = firefly();
+    const generationPrompt =
+      'Photorealistic senior business professionals in a modern office, natural skin texture, natural office lighting. No illustration, no digital artwork, no 3D render, no concept art.';
+    let observed: Parameters<NonNullable<ModifyAssetOptions['onBeforeFireflyGeneration']>>[0] | null =
+      null;
+
+    await modifyAsset(regenerateRequest(generationPrompt), {
+      gemini: geminiEditor(),
+      firefly: adobe,
+      generatedDir: TEST_DIR,
+      onBeforeFireflyGeneration: (meta) => {
+        observed = meta;
+      }
+    });
+
+    const providerRequest = adobe.generateImage.mock.calls[0]![0];
+    const prompt = providerRequest.prompt.toLowerCase();
+    expect(inferRegenerationVisualFamily(generationPrompt)).toBe('photographic');
+    expect(observed!.specification.visualFamily).toBe('photographic');
+    expect(providerRequest.contentClass).toBe('photo');
+    expect(providerRequest.referenceImage).toBeNull();
+    expect(prompt).toContain('visual family: photographic');
+    expect(prompt).toContain('photorealistic');
+    // The only occurrences of art-family words must be the marketer's own negations.
+    expect(prompt).not.toMatch(/visual family: (illustration|abstract digital)/);
+    expect(prompt.replace(/no illustration, no digital artwork, no 3d render, no concept art\./, ''))
+      .not.toMatch(/illustration|digital artwork|3d render|concept art|stylized/);
+  });
+
+  it('classifies subtractive-only art rejections as photographic', () => {
+    expect(inferRegenerationVisualFamily('No illustration, no 3D render, no concept art.')).toBe(
+      'photographic'
+    );
+    expect(inferRegenerationVisualFamily('Avoid abstract digital treatments.')).toBe('photographic');
+  });
+
+  it('injects compatible corporate KG textual guardrails and never substitutes retail visuals', async () => {
+    const adobe = firefly();
+    const generationPrompt =
+      'Create a premium campaign image showing realistic business professionals in a modern office.';
+    let observed: Parameters<NonNullable<ModifyAssetOptions['onBeforeFireflyGeneration']>>[0] | null =
+      null;
+
+    const result = await modifyAsset(regenerateRequest(generationPrompt), {
+      gemini: geminiEditor(),
+      firefly: adobe,
+      generatedDir: TEST_DIR,
+      onBeforeFireflyGeneration: (meta) => {
+        observed = meta;
+      }
+    });
+
+    expect(observed!.specification.brandGuardrails?.length).toBeGreaterThan(0);
+    const brandBlob = (observed!.specification.brandGuardrails || []).join('\n');
+    expect(brandBlob).not.toMatch(/mortgage|credit.?card|personal.?loan|fresco/i);
+    expect(observed!.fireflyPrompt.toLowerCase()).toContain(
+      generationPrompt.toLowerCase().slice(0, 40)
+    );
+    expect(observed!.referenceSource).toBe('none');
+    expect(adobe.generateImage.mock.calls[0]![0].referenceImage).toBeNull();
+    expect(result.derivedAsset?.brandGrounding?.applied).toBe(true);
+    expect(result.derivedAsset?.approval).toBe('Brand guidance applied');
+    expect(result.provenance.some((p) => /KG brand guidance/i.test(p))).toBe(true);
+  });
+
+  it('composites the owned KG logo after Firefly and keeps the raw artifact', async () => {
+    const canvas = await sharp({
+      create: { width: 800, height: 800, channels: 3, background: { r: 12, g: 30, b: 70 } }
+    })
+      .jpeg()
+      .toBuffer();
+
+    const adobe = {
+      generateImage: vi.fn(async (request: { prompt: string; referenceImage?: unknown }) => {
+        // Prove Firefly never receives logo bytes in this path.
+        expect(request.referenceImage).toBeNull();
+        expect(JSON.stringify(request)).not.toMatch(/vis-logo|Barclays Logo\.png|logoBytes/i);
+        const saved = persistGeneratedImageBytes({
+          bytes: canvas,
+          generatedDir: TEST_DIR,
+          id: 'ff-raw-logo-test'
+        });
+        return {
+          images: [{ id: saved.id, imageUrl: saved.publicUrl }],
+          jobId: 'FF-LOGO-TEST'
+        };
+      })
+    };
+
+    const result = await modifyAsset(
+      regenerateRequest(
+        'Create a premium photographic corporate banking hero. Include the Barclays logo.'
+      ),
+      {
+        gemini: geminiEditor(),
+        firefly: adobe as unknown as FireflyClient & { generateImage: ReturnType<typeof vi.fn> },
+        generatedDir: TEST_DIR
+      }
+    );
+
+    const derived = result.derivedAsset!;
+    expect(adobe.generateImage).toHaveBeenCalledTimes(1);
+    expect(adobe.generateImage.mock.calls[0]![0].referenceImage).toBeNull();
+    expect(derived.brandGrounding?.applied).toBe(true);
+    expect(derived.logoComposition?.applied).toBe(true);
+    expect(derived.logoComposition?.entryId).toBe('vis-logo-png');
+    expect(derived.logoComposition?.placement).toBe('top-left');
+    expect(derived.sourceImageId).toBe('ff-raw-logo-test');
+    expect(derived.sourceImageUrl).toBe('/api/ai/generated/ff-raw-logo-test');
+    // Final candidate points at a distinct branded asset.
+    expect(derived.imageUrl).toMatch(/^\/api\/ai\/generated\//);
+    expect(derived.imageUrl).not.toBe(derived.sourceImageUrl);
+    expect(getRegisteredGeneratedImage('ff-raw-logo-test')).toBeTruthy();
+    expect(derived.lineage).toMatch(/approved Barclays logo composition/i);
+    expect(result.provenance.some((p) => /approved Barclays logo composition/i.test(p))).toBe(true);
+
+    // Firefly prompt still forbids invented marks and asks for logo-safe space.
+    const prompt = adobe.generateImage.mock.calls[0]![0].prompt.toLowerCase();
+    expect(prompt).toMatch(/no generated logos|simulated barclays marks/);
+    expect(prompt).toMatch(/logo-safe|separately composited approved barclays logo/);
+  });
+
+  it('generates once then distributes adapted + logo-composited candidates to all channel targets', async () => {
+    const canvas = await sharp({
+      create: { width: 1000, height: 1000, channels: 3, background: { r: 18, g: 42, b: 88 } }
+    })
+      .jpeg()
+      .toBuffer();
+
+    const adobe = {
+      generateImage: vi.fn(async () => {
+        const saved = persistGeneratedImageBytes({
+          bytes: canvas,
+          generatedDir: TEST_DIR,
+          id: 'ff-master-cross'
+        });
+        return {
+          images: [{ id: saved.id, imageUrl: saved.publicUrl }],
+          jobId: 'FF-CROSS'
+        };
+      })
+    };
+
+    const request = {
+      ...regenerateRequest('Create a premium photographic corporate banking hero.'),
+      channelTargets: [
+        {
+          rootSourceDamAssetId: 'DAM-0188',
+          channel: 'LinkedIn',
+          format: 'Sponsored content · mobile crop',
+          dimensions: '1080 × 1080'
+        },
+        {
+          rootSourceDamAssetId: 'REQ-LI-WEB',
+          channel: 'LinkedIn',
+          format: 'Sponsored content · web',
+          dimensions: '1200 × 627'
+        },
+        {
+          rootSourceDamAssetId: 'DAM-0231',
+          channel: 'Email',
+          format: 'HTML email hero',
+          dimensions: '1200 × 480'
+        }
+      ]
+    };
+
+    const result = await modifyAsset(request, {
+      gemini: geminiEditor(),
+      firefly: adobe as unknown as FireflyClient & { generateImage: ReturnType<typeof vi.fn> },
+      generatedDir: TEST_DIR
+    });
+
+    expect(adobe.generateImage).toHaveBeenCalledTimes(1);
+    expect(result.channelDerivatives).toHaveLength(3);
+    expect(result.channelDerivativeFailures || []).toHaveLength(0);
+    expect(result.generationFamilyId).toMatch(/^GEN-FAM-/);
+    expect(result.masterGeneratedAssetId).toBe('ff-master-cross');
+
+    const byRoot = Object.fromEntries(
+      (result.channelDerivatives || []).map((d) => [d.rootSourceDamAssetId, d])
+    );
+    expect(byRoot['DAM-0188']?.dimensions).toBe('1080 × 1080');
+    expect(byRoot['DAM-0188']?.finalImageDimensions).toBe('1080 × 1080');
+    expect(byRoot['REQ-LI-WEB']?.dimensions).toBe('1200 × 627');
+    expect(byRoot['DAM-0231']?.dimensions).toBe('1200 × 480');
+
+    for (const derived of result.channelDerivatives || []) {
+      expect(derived.generationFamilyId).toBe(result.generationFamilyId);
+      expect(derived.masterGeneratedAssetId).toBe('ff-master-cross');
+      expect(derived.derivedFromMasterGeneratedAssetId).toBe('ff-master-cross');
+      expect(derived.brandGrounding?.applied).toBe(true);
+      expect(derived.logoComposition?.applied).toBe(true);
+      expect(derived.formatAdaptation).toBe('cover-crop');
+      expect(derived.imageUrl).toMatch(/^\/api\/ai\/generated\//);
+      expect(derived.imageUrl).not.toBe('/api/ai/generated/ff-master-cross');
+      expect(derived.included).toBe(false);
+      expect(derived.lineage).toMatch(/channel crop\/format adaptation/i);
+      expect(derived.lineage).toMatch(/approved Barclays logo composition/i);
+    }
+
+    // Active slot derivedAsset points at the requesting root.
+    expect(result.derivedAsset?.rootSourceDamAssetId).toBe('DAM-0188');
+  });
+
+  it('falls back to the raw Firefly image when logo composition cannot run', async () => {
+    // 1×1 canvas is below MIN_COMPOSITION_CANVAS_PX — composition must not wipe generation.
+    const adobe = firefly();
+    const result = await modifyAsset(regenerateRequest('Create a premium corporate banking visual.'), {
+      gemini: geminiEditor(),
+      firefly: adobe,
+      generatedDir: TEST_DIR
+    });
+
+    expect(result.derivedAsset?.imageUrl).toBeTruthy();
+    expect(result.derivedAsset?.logoComposition?.applied).toBe(false);
+    expect(result.derivedAsset?.logoComposition?.reason).toBe('canvas-too-small');
+    expect(result.derivedAsset?.brandGrounding?.applied).toBe(true);
+    expect(result.provenance.some((p) => /logo composition not applied/i.test(p))).toBe(true);
+  });
+
+  it('does not composite logos on the Gemini Modify path', async () => {
+    const result = await modifyAsset(BASE_REQUEST, {
+      gemini: geminiEditor(),
+      firefly: firefly(),
+      generatedDir: TEST_DIR
+    });
+    expect(result.intent).toBe('modify_current_asset');
+    expect(result.derivedAsset?.logoComposition).toBeUndefined();
+    expect(result.derivedAsset?.lineage || '').not.toMatch(/logo composition/i);
+  });
+
+  it('still classifies an explicit illustration request as illustration', async () => {
+    const adobe = firefly();
+    const generationPrompt = 'Create a flat vector illustration of a city skyline.';
+    let observed: Parameters<NonNullable<ModifyAssetOptions['onBeforeFireflyGeneration']>>[0] | null =
+      null;
+
+    await modifyAsset(regenerateRequest(generationPrompt), {
+      gemini: geminiEditor(),
+      firefly: adobe,
+      generatedDir: TEST_DIR,
+      onBeforeFireflyGeneration: (meta) => {
+        observed = meta;
+      }
+    });
+
+    expect(inferRegenerationVisualFamily(generationPrompt)).toBe('illustration');
+    expect(observed!.specification.visualFamily).toBe('illustration');
+    expect(adobe.generateImage.mock.calls[0]![0].contentClass).toBe('art');
+  });
+
+  it('derives abstract direction only when the marketer explicitly requests it', async () => {
+    const adobe = firefly();
+    const generationPrompt =
+      'Create an abstract digital banking visual with flowing cyan ribbons on a deep navy background.';
+    let observed: Parameters<NonNullable<ModifyAssetOptions['onBeforeFireflyGeneration']>>[0] | null =
+      null;
+
+    await modifyAsset(regenerateRequest(generationPrompt), {
+      gemini: geminiEditor(),
+      firefly: adobe,
+      generatedDir: TEST_DIR,
+      onBeforeFireflyGeneration: (meta) => {
+        observed = meta;
+      }
+    });
+
+    const providerRequest = adobe.generateImage.mock.calls[0]![0];
+    const prompt = providerRequest.prompt.toLowerCase();
+    expect(inferRegenerationVisualFamily(generationPrompt)).toBe('abstract-digital');
+    expect(observed!.specification.visualFamily).toBe('abstract-digital');
+    expect(observed!.contentClass).toBe('art');
+    expect(prompt).toContain('visual family: abstract digital');
+    expect(prompt).toContain('flowing cyan ribbons');
+    expect(prompt).toContain('deep navy background');
+  });
+
+  it('does not send the current DAM image as a regeneration style reference', async () => {
+    const adobe = firefly();
+    await modifyAsset(
+      {
+        ...regenerateRequest('Create a realistic photograph of two executives in an office.'),
+        sourceDamAsset: {
+          ...BASE_REQUEST.sourceDamAsset,
+          imageUrl: `data:image/png;base64,${PNG.toString('base64')}`
+        }
+      },
+      { gemini: geminiEditor(), firefly: adobe, generatedDir: TEST_DIR }
+    );
+
+    expect(adobe.generateImage.mock.calls[0]![0].referenceImage).toBeNull();
+  });
+
   it('calls Firefly and never Gemini', async () => {
     const gemini = geminiEditor();
     const adobe = firefly();
@@ -558,6 +972,24 @@ describe('Regenerate creative — Firefly only', () => {
     ).rejects.toMatchObject({
       message: 'generationPrompt is required for Firefly regeneration'
     });
+  });
+
+  it('loads the single-panel public asset for Gemini edit when imageUrl is /assets/...', async () => {
+    const { resolveEditSourceImageBytes } = await import('./resolveReference');
+    const resolved = await resolveEditSourceImageBytes({
+      id: 'DAM-0188',
+      imageUrl: '/assets/iportal-creative-single.png',
+      mimeType: 'image/png'
+    });
+    expect(resolved).not.toBeNull();
+    expect(resolved!.mimeType).toBe('image/png');
+    expect(resolved!.bytes.length).toBeGreaterThan(1000);
+    expect(resolved!.bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))).toBe(
+      true
+    );
+    const meta = await sharp(resolved!.bytes).metadata();
+    expect(meta.width).toBe(559);
+    expect(meta.height).toBe(706);
   });
 
   it('keeps provider failure atomic', async () => {

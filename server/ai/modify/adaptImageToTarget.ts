@@ -8,6 +8,7 @@
 import sharp from 'sharp';
 import {
   describeBlankBands,
+  minBandLengthForAxis,
   scanInteriorBlankBands,
   type BlankBand
 } from './blankBand';
@@ -216,6 +217,13 @@ export type ChannelAdaptationOutcome =
       reason: string;
       sourceWidth: number;
       sourceHeight: number;
+      /** Which structural check rejected the crop, with its measured value. */
+      validator: 'interior-blank-band';
+      measuredBandPixels: number;
+      measuredBandFraction: number;
+      thresholdBandPixels: number;
+      /** True when the same band is already present in the unadapted source. */
+      bandPresentInSource: boolean;
     };
 
 /**
@@ -260,6 +268,11 @@ export async function adaptImageToChannelFormat(input: {
     if (!firstBands.length) firstBands = scan.bands;
   }
 
+  // Distinguishes a bad crop from a source the provider already returned split.
+  const sourceScan = await scanInteriorBlankBands(bytes);
+  const worst = firstBands.reduce((a, b) => (b.length > a.length ? b : a), firstBands[0]!);
+  const axis = worst.orientation === 'vertical' ? targetWidth : targetHeight;
+
   return {
     status: 'composition-lost',
     strategy,
@@ -267,6 +280,11 @@ export async function adaptImageToChannelFormat(input: {
     bands: firstBands,
     reason: `blank band splits the adapted creative (${describeBlankBands(firstBands)})`,
     sourceWidth: source.width,
-    sourceHeight: source.height
+    sourceHeight: source.height,
+    validator: 'interior-blank-band',
+    measuredBandPixels: worst.length,
+    measuredBandFraction: worst.fractionOfAxis,
+    thresholdBandPixels: minBandLengthForAxis(axis),
+    bandPresentInSource: sourceScan.bands.length > 0
   };
 }

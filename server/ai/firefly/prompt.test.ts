@@ -179,6 +179,22 @@ describe('Firefly prompt budget', () => {
     expect(resolveFireflyContentClass(specification)).toBe('art');
   });
 
+  it('maps photographic to the photo content class', () => {
+    const specification = assembleCreativeSpecification(BASE_INPUT, {
+      ...TYPICAL_PARTIAL,
+      visualFamily: 'photographic'
+    });
+    expect(resolveFireflyContentClass(specification)).toBe('photo');
+  });
+
+  it('omits contentClass for unclassified visual families rather than defaulting to art', () => {
+    const specification = assembleCreativeSpecification(BASE_INPUT, {
+      ...TYPICAL_PARTIAL,
+      visualFamily: 'other'
+    });
+    expect(resolveFireflyContentClass(specification)).toBeUndefined();
+  });
+
   it('places requestedChange ahead of brand guardrails and reference guidance', () => {
     const specification = assembleCreativeSpecification(BASE_INPUT, TYPICAL_PARTIAL);
     const prompt = buildFireflyPrompt({

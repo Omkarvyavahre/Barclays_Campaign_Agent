@@ -11,6 +11,7 @@
  */
 
 import { readFileSync, existsSync } from 'node:fs';
+import { basename, extname, resolve as resolvePath } from 'node:path';
 import { listLogoAssets, resolveVisualAbsolutePath, selectVisualReference } from '../../knowledge/visualReferences';
 import { VISUAL_ENTRIES } from '../../knowledge/catalogue';
 import { readRegisteredGeneratedBytes } from '../firefly/storage';
@@ -63,6 +64,36 @@ function generatedIdFromUrl(imageUrl: string): string | null {
   return match?.[1] ?? null;
 }
 
+function mimeFromAssetPath(filePath: string, mimeHint?: string): string {
+  if (mimeHint?.startsWith('image/')) return mimeHint;
+  const ext = extname(filePath).toLowerCase();
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.webp') return 'image/webp';
+  if (ext === '.gif') return 'image/gif';
+  return 'image/png';
+}
+
+/**
+ * Resolve trusted public static creatives such as `/assets/iportal-creative-single.png`.
+ * Only filenames under `public/assets/` are accepted — no path traversal.
+ */
+function readPublicAssetBytes(
+  imageUrl: string,
+  mimeHint?: string
+): { bytes: Buffer; mimeType: string } | null {
+  const match = /^\/assets\/([^/?#]+)$/i.exec(imageUrl.trim());
+  if (!match) return null;
+  const fileName = basename(match[1]!);
+  if (!fileName || fileName !== match[1]) return null;
+  const absolute = resolvePath(process.cwd(), 'public', 'assets', fileName);
+  const assetsRoot = resolvePath(process.cwd(), 'public', 'assets');
+  if (!absolute.startsWith(assetsRoot) || !existsSync(absolute)) return null;
+  return {
+    bytes: readFileSync(absolute),
+    mimeType: mimeFromAssetPath(absolute, mimeHint)
+  };
+}
+
 /**
  * Load the active edit-source image. Generated `/api/ai/generated/:id` URLs are
  * resolved to registered bytes so providers receive uploadable image bytes.
@@ -83,6 +114,13 @@ export function resolveEditSourceReferenceImage(
     );
     if (decoded) {
       return { bytes: decoded.bytes, mimeType: decoded.mimeType };
+    }
+  }
+
+  if (sourceDamAsset.imageUrl?.startsWith('/assets/')) {
+    const local = readPublicAssetBytes(sourceDamAsset.imageUrl, sourceDamAsset.mimeType);
+    if (local) {
+      return { bytes: local.bytes, mimeType: local.mimeType };
     }
   }
 
@@ -215,11 +253,13 @@ export function resolveModifyVisualReference(options: {
 
   // New generation must not silently edit the current asset.
   if (mode === 'generate') {
-    if (visualReference) {
+    // KG style guidance is optional and only valid when it matches the visual family
+    // deterministically inferred from the marketer's generation prompt.
+    if (visualReference?.visualFamily === specification.visualFamily) {
       return resolveKnowledgeGraphReference(specification, visualReference);
     }
     return {
-      referenceSource: 'source-dam-asset',
+      referenceSource: 'none',
       visualReference: null,
       referenceId: sourceDamAsset.id,
       referenceImage: null

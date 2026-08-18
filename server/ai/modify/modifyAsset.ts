@@ -8,7 +8,7 @@
  * JSON-only text gateway for image output.
  */
 
-import type { CreativeSpecification } from '../creative/types';
+import type { CreativeSpecification, PublicVisualReference } from '../creative/types';
 import { randomUUID } from 'node:crypto';
 import type { GeminiJsonClient } from '../gemini/types';
 import { createGeminiClient } from '../gemini/client';
@@ -21,7 +21,7 @@ import {
   resolveFireflyContentClass,
   type FireflyClient
 } from '../firefly';
-import { persistGeneratedImageBytes } from '../firefly/storage';
+import { persistGeneratedImageBytes, readRegisteredGeneratedBytes } from '../firefly/storage';
 import {
   adaptImageToChannelFormat,
   formatDimensions,
@@ -29,15 +29,27 @@ import {
   readImageDimensions,
   resolveCropStrategy,
   type ChannelAdaptationOutcome,
-  type CropPosition
+  type CropPosition,
+  type CropStrategySource
 } from './adaptImageToTarget';
+import {
+  compositeOwnedLogo,
+  DEFAULT_OWNED_LOGO_ENTRY_ID,
+  type LogoCompositionMetadata
+} from './compositeOwnedLogo';
 import { buildDerivedAsset } from './derivedAsset';
+import { distributeCrossChannelCreatives } from './distributeCrossChannelCreatives';
 import {
   ReferenceResolutionError,
   resolveEditSourceImageBytes,
   resolveModifyVisualReference
 } from './resolveReference';
 import type { ModifyAssetRequest, ModifyAssetResult } from './types';
+import type { VisualFamily } from '../../knowledge/visualFamily';
+import {
+  getCreativeGrounding,
+  toBrandGroundingMetadata
+} from '../../knowledge/creativeGrounding';
 
 const GEMINI_EDIT_UNSUPPORTED_MESSAGE =
   'Gemini image editing is not configured. Set GEMINI_IMAGE_API_KEY and GEMINI_IMAGE_MODEL. The current asset was left unchanged.';
@@ -80,20 +92,26 @@ export type ModifyAssetOptions = {
     contentClass: ReturnType<typeof resolveFireflyContentClass>;
     referenceSource: NonNullable<ModifyAssetResult['referenceSource']>;
   }) => void;
+  /**
+   * Called when channel adaptation is rejected and the slot is left unchanged.
+   * Carries the measurement behind the concise UI message.
+   */
+  onChannelAdaptationRejected?: (meta: {
+    assetId: string;
+    channel?: string;
+    sourceDimensions?: string;
+    targetDimensions?: string;
+    cropStrategy: CropStrategySource;
+    cropAnchorsTried: CropPosition[];
+    negativeSpaceHint?: string;
+    validator: 'interior-blank-band';
+    measuredBandPixels: number;
+    measuredBandFraction: number;
+    thresholdBandPixels: number;
+    bandPresentInSource: boolean;
+    rawImageId: string;
+  }) => void;
 };
-
-function isValidSpecification(value: unknown): value is CreativeSpecification {
-  if (!value || typeof value !== 'object') return false;
-  const v = value as CreativeSpecification;
-  return Boolean(
-    v.content?.title &&
-      v.content?.description &&
-      v.content?.cta &&
-      v.requestedChange &&
-      v.visualFamily &&
-      v.businessDomain
-  );
-}
 
 function runCopyOnly(request: ModifyAssetRequest): ModifyAssetResult {
   const contentUpdate = {
@@ -118,46 +136,147 @@ function runCopyOnly(request: ModifyAssetRequest): ModifyAssetResult {
   };
 }
 
-function specificationForRegeneration(request: ModifyAssetRequest): CreativeSpecification {
-  if (isValidSpecification(request.existingSpecification)) {
-    return {
-      ...request.existingSpecification,
-      requestedChange: request.generationPrompt!.trim(),
-      content: {
-        title: request.modification.title,
-        description: request.modification.description,
-        cta: request.modification.cta
-      },
-      sourceAsset: {
-        id: request.asset.id,
-        sourceId: request.asset.sourceId,
-        lineage: request.asset.lineage
-      }
-    };
+/**
+ * Campaign content for the regenerated creative. The prompt-only modal supplies no content, so it
+ * falls back to the current asset and finally to channel-safe defaults.
+ */
+function regenerationContent(request: ModifyAssetRequest): {
+  title: string;
+  description: string;
+  cta: string;
+} {
+  const modification = request.modification ?? ({} as ModifyAssetRequest['modification']);
+  const asset = request.asset ?? ({} as ModifyAssetRequest['asset']);
+  return {
+    title: modification.title?.trim() || asset.headline?.trim() || 'Campaign creative',
+    description:
+      modification.description?.trim() ||
+      asset.copy?.trim() ||
+      request.generationPrompt!.trim(),
+    cta: modification.cta?.trim() || asset.cta?.trim() || 'Learn more'
+  };
+}
+
+/**
+ * A negated clause runs from the negation word to the next clause boundary, so
+ * "no illustration, no 3D render" yields two excluded fragments rather than
+ * counting as a request for illustration.
+ */
+const NEGATION_CLAUSE = /\b(?:no|not|never|avoid|avoiding|without|exclude|excluding|don't|dont)\b[^.;,]*/gi;
+
+const FAMILY_PATTERNS: ReadonlyArray<{ family: VisualFamily; pattern: RegExp }> = [
+  {
+    family: 'photographic',
+    pattern:
+      /\b(photorealistic|photo-realistic|photorealism|commercial photography|corporate photography|documentary photography|real photograph|photograph)\b/
+  },
+  {
+    family: 'abstract-digital',
+    pattern:
+      /\b(abstract|digital ribbons?|light ribbons?|flowing ribbons?|cyan ribbons?|navy background|digital banking visual)\b/
+  },
+  {
+    family: 'interface-led',
+    pattern: /\b(product screenshot|product screen|app screenshot|interface|dashboard|user interface|ui)\b/
+  },
+  { family: 'product-led', pattern: /\b(product shot|device mockup|packshot)\b/ },
+  {
+    family: 'illustration',
+    pattern: /\b(illustration|illustrated|illustrative|vector art|cartoon|drawn|concept art|3d render|digital artwork)\b/
+  },
+  {
+    family: 'photographic',
+    pattern:
+      /\b(realistic|photographic|photography|photo|real people|business professionals?|people|persons?|executives?|office|natural light(?:ing)?|corporate portrait|skin texture)\b/
   }
+];
+
+/**
+ * Deterministic user-intent classification for Regenerate creative.
+ * Campaign type is deliberately absent: an iPortal campaign can be photographic.
+ */
+export function inferRegenerationVisualFamily(generationPrompt: string): VisualFamily {
+  const prompt = generationPrompt.toLowerCase();
+  const negatedText = prompt.match(NEGATION_CLAUSE)?.join(' ') ?? '';
+  const requestedText = prompt.replace(NEGATION_CLAUSE, ' ');
+
+  for (const { family, pattern } of FAMILY_PATTERNS) {
+    if (pattern.test(requestedText)) return family;
+  }
+
+  // Purely subtractive direction ("no illustration, no 3D render") still rules
+  // out the art families, which leaves photography as the requested intent.
+  const rejectsArtFamilies = FAMILY_PATTERNS.some(
+    ({ family, pattern }) =>
+      (family === 'illustration' || family === 'abstract-digital') && pattern.test(negatedText)
+  );
+  if (rejectsArtFamilies) return 'photographic';
+
+  return 'other';
+}
+
+function specificationForRegeneration(
+  request: ModifyAssetRequest,
+  brandGuardrails: string[] = []
+): CreativeSpecification {
+  const content = regenerationContent(request);
+  const requestedChange = request.generationPrompt!.trim();
+  const visualFamily = inferRegenerationVisualFamily(requestedChange);
+  const format = [request.asset.format, request.asset.dimensions].filter(Boolean).join(', ');
+  // Regenerate always composites the owned logo locally afterward — Firefly must leave
+  // logo-safe space and must never invent Barclays marks.
+  const photographic = visualFamily === 'photographic';
   return {
     businessDomain: request.campaignContext.businessDomain,
     campaignType: request.campaignContext.campaignType || 'campaign',
     channel: request.campaignContext.channel || request.asset.channel || 'unknown',
-    content: {
-      title: request.modification.title,
-      description: request.modification.description,
-      cta: request.modification.cta
-    },
-    requestedChange: request.generationPrompt!.trim(),
-    visualFamily: 'abstract-digital',
-    composition: 'Channel-appropriate campaign composition with clear visual hierarchy.',
+    content,
+    requestedChange,
+    visualFamily,
+    composition: [
+      `Create one campaign-ready visual${format ? ` for ${format}` : ''} with a clear focal hierarchy`,
+      'Reserve clean logo-safe space for a separately composited approved Barclays logo'
+    ].join('. '),
     negativeSpace: 'unspecified',
-    tone: ['premium', 'confident', 'modern'],
-    preserve: ['approved Barclays brand guardrails', 'channel and format requirements'],
-    avoid: ['generated logos or simulated Barclays marks', 'text rendered into the image'],
-    accessibility: ['maintain sufficient contrast and clear focal hierarchy'],
+    tone: photographic
+      ? ['professional', 'natural', 'authentic', 'premium']
+      : ['professional', 'campaign-appropriate'],
+    preserve: [
+      'the marketer generation prompt as the primary creative direction',
+      'channel and format requirements',
+      'logo-safe area for approved owned logo compositing'
+    ],
+    avoid: [
+      'generated logos or simulated Barclays marks',
+      'readable text or pseudo-text rendered into the image',
+      'collage, split-screen or multiple variants',
+      ...(photographic ? ['distorted, duplicated or anatomically incorrect people'] : [])
+    ],
+    accessibility: ['maintain sufficient contrast and a clear accessible focal hierarchy'],
+    brandGuardrails,
     sourceAsset: {
       id: request.asset.id,
       sourceId: request.asset.sourceId,
       lineage: request.asset.lineage
     }
   };
+}
+
+function creativeGroundingForRequest(
+  request: ModifyAssetRequest,
+  options: { requestedChange: string; visualFamily?: VisualFamily }
+) {
+  return getCreativeGrounding({
+    businessDomain: request.campaignContext.businessDomain,
+    campaignType: request.campaignContext.campaignType,
+    channel: request.campaignContext.channel || request.asset.channel,
+    product:
+      typeof request.campaignBrief?.product === 'string'
+        ? request.campaignBrief.product
+        : undefined,
+    visualFamily: options.visualFamily,
+    requestedChange: options.requestedChange
+  });
 }
 
 async function runFireflyRegeneration(
@@ -169,14 +288,28 @@ async function runFireflyRegeneration(
   if (!generationPrompt) {
     throw new ModifyAssetError('generationPrompt is required for Firefly regeneration', 400);
   }
-  const specification = specificationForRegeneration(request);
+  const visualFamily = inferRegenerationVisualFamily(generationPrompt);
+  const grounding = creativeGroundingForRequest(request, {
+    requestedChange: generationPrompt,
+    visualFamily
+  });
+  const specification = specificationForRegeneration(request, grounding.guardrails);
+  const brandGrounding = toBrandGroundingMetadata(grounding);
+
+  // Prefer an already-compatible caller-supplied reference; otherwise use KG when family matches.
+  const kgVisual =
+    grounding.visualReference &&
+    grounding.visualReference.visualFamily === specification.visualFamily
+      ? (grounding.visualReference as PublicVisualReference)
+      : null;
+  const visualReference = request.existingVisualReference ?? kgVisual;
 
   let resolved;
   try {
     resolved = resolveModifyVisualReference({
       mode: 'generate',
       specification,
-      visualReference: request.existingVisualReference ?? null,
+      visualReference: visualReference ?? null,
       sourceDamAsset: request.sourceDamAsset
     });
   } catch (error) {
@@ -213,9 +346,7 @@ async function runFireflyRegeneration(
             ...resolved.referenceImage,
             referenceId: resolved.referenceId
           }
-        : {
-            referenceId: resolved.referenceId
-          }
+        : null
     });
   } catch (error) {
     if (error instanceof FireflyClientError || error instanceof ReferenceResolutionError) {
@@ -241,12 +372,129 @@ async function runFireflyRegeneration(
     ]);
   }
 
+  // Raw Firefly artifact stays registered; composition / channel adaptation write separate finals.
+  const rawImageId = image.id;
+  const rawImageUrl = image.imageUrl;
+
+  const rawBytes =
+    (rawImageId ? readRegisteredGeneratedBytes(rawImageId) : null) ??
+    (() => {
+      const match = /^\/api\/ai\/generated\/([^/?#]+)/i.exec(rawImageUrl);
+      return match?.[1] ? readRegisteredGeneratedBytes(match[1]) : null;
+    })();
+
+  const channelTargets = Array.isArray(request.channelTargets)
+    ? request.channelTargets.filter(
+        (t) => t && typeof t.rootSourceDamAssetId === 'string' && t.rootSourceDamAssetId.trim()
+      )
+    : [];
+
+  // Cross-channel Add new creative: one Firefly call → adapt → logo per Stage 6 slot.
+  if (channelTargets.length > 0 && rawBytes) {
+    const distributed = await distributeCrossChannelCreatives({
+      request,
+      targets: channelTargets,
+      masterBytes: rawBytes.bytes,
+      masterMimeType: rawBytes.mimeType,
+      masterImageId: rawImageId || `ff-master-${Date.now()}`,
+      masterImageUrl: rawImageUrl,
+      specification,
+      referenceSource: resolved.referenceSource,
+      brandGrounding,
+      jobId: fireflyResult.jobId,
+      generatedDir: options.generatedDir,
+      cropFocalPoint: request.cropFocalPoint
+    });
+
+    if (!distributed.channelDerivatives.length) {
+      throw new ModifyAssetError('Creative generation failed', 502, 'generating', [
+        'Channel adaptation failed for all targets',
+        ...distributed.channelDerivativeFailures.map((f) => `${f.channel}: ${f.reason}`)
+      ]);
+    }
+
+    const activeRoot =
+      request.rootSourceDamAssetId || request.asset.sourceId || request.asset.id;
+    const derivedAsset =
+      distributed.channelDerivatives.find((d) => d.rootSourceDamAssetId === activeRoot) ||
+      distributed.channelDerivatives[0]!;
+
+    return {
+      stage: 'ready',
+      intent: 'regenerate_with_firefly',
+      instruction: generationPrompt,
+      referenceSource: resolved.referenceSource,
+      derivedAsset,
+      channelDerivatives: distributed.channelDerivatives,
+      channelDerivativeFailures: distributed.channelDerivativeFailures,
+      generationFamilyId: distributed.generationFamilyId,
+      masterGeneratedAssetId: distributed.masterGeneratedAssetId,
+      fireflyPrompt,
+      fireflyJobTelemetry: fireflyResult.jobTelemetry
+        ? {
+            fireflyJobId: fireflyResult.jobTelemetry.fireflyJobId,
+            initialResponseStatus: fireflyResult.jobTelemetry.initialResponseStatus,
+            pollCount: fireflyResult.jobTelemetry.pollCount,
+            statusTransitions: [...fireflyResult.jobTelemetry.statusTransitions],
+            finalJobStatus: fireflyResult.jobTelemetry.finalJobStatus,
+            generatedImageAvailable: fireflyResult.jobTelemetry.generatedImageAvailable
+          }
+        : undefined,
+      provenance: [
+        `Edit source asset ${request.editSourceAssetId || request.sourceDamAsset.id}`,
+        `Root DAM asset ${request.rootSourceDamAssetId || request.asset.sourceId || request.asset.id}`,
+        'Add new creative (cross-channel)',
+        'authoritative Firefly generation prompt',
+        brandGrounding.applied
+          ? `KG brand guidance (${brandGrounding.ruleCount} rules)`
+          : 'no compatible KG brand guidance',
+        'Firefly generation (single provider call)',
+        `generation family ${distributed.generationFamilyId}`,
+        `master artifact ${distributed.masterGeneratedAssetId}`,
+        `channel derivatives ${distributed.channelDerivatives.length}`,
+        distributed.channelDerivativeFailures.length
+          ? `channel adaptation failures ${distributed.channelDerivativeFailures.length}`
+          : 'all channel adaptations succeeded',
+        'channel crop then approved logo composition per slot'
+      ]
+    };
+  }
+
+  // Single-slot / legacy regenerate: compose logo on the raw Firefly canvas only.
+  let finalImageUrl = rawImageUrl;
+  let logoComposition: LogoCompositionMetadata = {
+    applied: false,
+    reason: 'raw-unavailable'
+  };
+
+  if (rawBytes) {
+    const composed = await compositeOwnedLogo({
+      imageBytes: rawBytes.bytes,
+      imageMimeType: rawBytes.mimeType,
+      logoEntryId: DEFAULT_OWNED_LOGO_ENTRY_ID,
+      placement: 'top-left'
+    });
+    logoComposition = composed.metadata;
+    if (composed.metadata.applied) {
+      const branded = persistGeneratedImageBytes({
+        bytes: composed.bytes,
+        mimeType: composed.mimeType,
+        generatedDir: options.generatedDir
+      });
+      finalImageUrl = branded.publicUrl;
+    }
+  }
+
   const derivedAsset = buildDerivedAsset({
     request,
     specification,
     referenceSource: resolved.referenceSource,
-    imageUrl: image.imageUrl,
-    jobId: fireflyResult.jobId
+    imageUrl: finalImageUrl,
+    jobId: fireflyResult.jobId,
+    sourceImageUrl: rawImageUrl,
+    sourceImageId: rawImageId,
+    brandGrounding,
+    logoComposition
   });
 
   return {
@@ -271,10 +519,16 @@ async function runFireflyRegeneration(
       `Root DAM asset ${request.rootSourceDamAssetId || request.asset.sourceId || request.asset.id}`,
       'Regenerate creative action',
       'authoritative Firefly generation prompt',
+      brandGrounding.applied
+        ? `KG brand guidance (${brandGrounding.ruleCount} rules)`
+        : 'no compatible KG brand guidance',
       resolved.referenceSource === 'knowledge-graph'
         ? `KG reference ${resolved.referenceId}`
         : `prompt-led generation (${resolved.referenceId})`,
       'Firefly generation',
+      logoComposition.applied
+        ? `approved Barclays logo composition (${logoComposition.entryId})`
+        : `logo composition not applied (${logoComposition.reason || 'unknown'})`,
       `derived campaign asset ${derivedAsset.id}`
     ]
   };
@@ -283,8 +537,9 @@ async function runFireflyRegeneration(
 async function runGeminiModify(
   request: ModifyAssetRequest,
   gemini: GeminiJsonClient,
-  generatedDir?: string
+  options: ModifyAssetOptions
 ): Promise<ModifyAssetResult> {
+  const generatedDir = options.generatedDir;
   const instruction = request.modification.prompt.trim();
   if (!gemini.editImage) {
     const caps = describeGeminiImageConfig();
@@ -325,6 +580,8 @@ async function runGeminiModify(
   }
 
   let edited;
+  const grounding = creativeGroundingForRequest(request, { requestedChange: instruction });
+  const brandGrounding = toBrandGroundingMetadata(grounding);
   try {
     edited = await gemini.editImage({
       instruction,
@@ -336,11 +593,16 @@ async function runGeminiModify(
       channel: request.asset.channel,
       format: request.asset.format,
       dimensions: request.asset.dimensions,
+      // Universal technical constraints — not catalogue brand rules.
       guardrails: [
-        'Do not generate or simulate Barclays logos.',
         'Do not render Title, Description or CTA into the image.',
         'Preserve the current asset identity unless the prompt explicitly requests a visual change.'
       ],
+      // Compatible KG brand rules (corporate/iPortal → GS4PM + logo ownership only).
+      brandGuardrails:
+        grounding.guardrails.length > 0
+          ? grounding.guardrails
+          : ['Do not generate or simulate Barclays logos.'],
       authoritativeContent: {
         title: request.modification.title,
         description: request.modification.description,
@@ -397,10 +659,13 @@ async function runGeminiModify(
     ]);
   }
 
-  const specification = specificationForRegeneration({
-    ...request,
-    generationPrompt: instruction
-  });
+  const specification = specificationForRegeneration(
+    {
+      ...request,
+      generationPrompt: instruction
+    },
+    grounding.guardrails
+  );
   const target = parseDimensions(request.asset.dimensions);
   const cropStrategy = resolveCropStrategy({
     focalPoint: request.cropFocalPoint,
@@ -440,6 +705,21 @@ async function runGeminiModify(
     }
 
     if (outcome?.status === 'composition-lost') {
+      options.onChannelAdaptationRejected?.({
+        assetId: request.asset.id,
+        channel: request.asset.channel,
+        sourceDimensions: sourceImageDimensions,
+        targetDimensions,
+        cropStrategy: cropStrategy.source,
+        cropAnchorsTried: outcome.candidatesTried,
+        negativeSpaceHint: cropStrategy.negativeSpaceHint,
+        validator: outcome.validator,
+        measuredBandPixels: outcome.measuredBandPixels,
+        measuredBandFraction: outcome.measuredBandFraction,
+        thresholdBandPixels: outcome.thresholdBandPixels,
+        bandPresentInSource: outcome.bandPresentInSource,
+        rawImageId: sourcePersisted.id
+      });
       // No crop anchor keeps the creative continuous — leave the slot untouched.
       return {
         stage: 'unsupported',
@@ -455,6 +735,9 @@ async function runGeminiModify(
           `raw Gemini source ${sourcePersisted.id}`,
           `channel crop rejected for ${targetDimensions} — ${outcome.reason}`,
           `crop anchors tried: ${outcome.candidatesTried.join(', ')}`,
+          outcome.bandPresentInSource
+            ? 'blank band already present in the provider output, not introduced by the crop'
+            : 'blank band introduced by the crop',
           'current asset left unchanged'
         ]
       };
@@ -495,7 +778,8 @@ async function runGeminiModify(
     targetDimensions,
     finalImageDimensions:
       formatAdaptation === 'cover-crop' ? finalImageDimensions : sourceImageDimensions,
-    formatAdaptation
+    formatAdaptation,
+    brandGrounding
   });
 
   return {
@@ -511,6 +795,9 @@ async function runGeminiModify(
       sourceImageDimensions
         ? `Gemini image edit (${sourceImageDimensions})`
         : 'Gemini image edit',
+      brandGrounding.applied
+        ? `KG brand guidance (${brandGrounding.ruleCount} rules)`
+        : 'no compatible KG brand guidance',
       `raw Gemini source ${sourcePersisted.id}`,
       formatAdaptation === 'cover-crop' && targetDimensions
         ? `channel crop/format adaptation (${targetDimensions}, cover, ${cropPositionUsed} anchor via ${cropStrategy.source})`
@@ -539,10 +826,13 @@ export async function modifyAsset(
     throw new ModifyAssetError('Only mode=modify is supported in this phase', 400, 'routing');
   }
 
+  // Regeneration is prompt-led: campaign content is descriptive metadata that the caller resolves
+  // from application state, so it is not a required input on that path.
   if (
-    !request.modification?.title?.trim() ||
-    !request.modification.description?.trim() ||
-    !request.modification.cta?.trim()
+    request.regenerate !== true &&
+    (!request.modification?.title?.trim() ||
+      !request.modification.description?.trim() ||
+      !request.modification.cta?.trim())
   ) {
     throw new ModifyAssetError('Title, Description and CTA are required', 400);
   }
@@ -562,7 +852,7 @@ export async function modifyAsset(
     return runCopyOnly(request);
   }
 
-  return runGeminiModify(request, gemini, options.generatedDir);
+  return runGeminiModify(request, gemini, options);
 }
 
 export function toPublicModifyAssetResult(result: ModifyAssetResult) {
@@ -575,6 +865,10 @@ export function toPublicModifyAssetResult(result: ModifyAssetResult) {
     interpretation: result.interpretation,
     referenceSource: result.referenceSource,
     derivedAsset: result.derivedAsset,
+    channelDerivatives: result.channelDerivatives,
+    channelDerivativeFailures: result.channelDerivativeFailures,
+    generationFamilyId: result.generationFamilyId,
+    masterGeneratedAssetId: result.masterGeneratedAssetId,
     contentUpdate: result.contentUpdate,
     keepImage: result.keepImage
   };

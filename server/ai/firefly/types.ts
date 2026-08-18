@@ -9,7 +9,7 @@ import type { CreativeSpecification } from '../creative/types';
 
 export type FireflyContentClass = 'photo' | 'art';
 
-export type FireflyReferenceSource = 'knowledge-graph' | 'source-dam-asset';
+export type FireflyReferenceSource = 'knowledge-graph' | 'source-dam-asset' | 'none';
 
 /** Injectable reference image for style guidance (uploadId or url). */
 export type FireflyReferenceImage = {
@@ -84,6 +84,8 @@ export type FireflyClientOptions = {
   pollIntervalMs?: number;
   /** Job timeout override (tests). Default FIREFLY_JOB_TIMEOUT_MS. */
   jobTimeoutMs?: number;
+  /** TCP+TLS connect budget for Adobe hosts. Default FIREFLY_CONNECT_TIMEOUT_MS. */
+  connectTimeoutMs?: number;
   /** Injectable delay for tests (default setTimeout). */
   sleep?: (ms: number) => Promise<void>;
 };

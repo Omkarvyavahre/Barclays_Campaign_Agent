@@ -154,7 +154,17 @@ export async function handleModifyAssetRequest(
 
     const gemini = deps.gemini ?? productionGeminiClient();
     const firefly = deps.firefly ?? createFireflyClient({ live: fireflyLive });
-    const result = await modifyAsset(body, { gemini, firefly });
+    const result = await modifyAsset(body, {
+      gemini,
+      firefly,
+      onChannelAdaptationRejected: (meta) =>
+        logDev('channel adaptation rejected', {
+          ...meta,
+          classification: meta.bandPresentInSource
+            ? 'provider_output_comparison_layout'
+            : 'adaptation_output_blank_band'
+        })
+    });
     sendJson(res, 200, toPublicModifyAssetResult(result));
   } catch (error) {
     if (error instanceof ModifyAssetError) {

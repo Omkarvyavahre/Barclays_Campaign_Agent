@@ -5,6 +5,8 @@
 import { randomUUID } from 'node:crypto';
 import type { CreativeSpecification } from '../creative/types';
 import type { FireflyReferenceSource } from '../firefly/types';
+import type { BrandGroundingMetadata } from '../../knowledge/creativeGrounding';
+import type { LogoCompositionMetadata } from './compositeOwnedLogo';
 import type { DerivedCampaignAsset, ModifyAssetRequest } from './types';
 
 function resolveLineageIds(request: ModifyAssetRequest): {
@@ -31,6 +33,7 @@ function buildLineageString(options: {
   formatAdaptation?: 'cover-crop' | 'none';
   targetDimensions?: string;
   sourceImageDimensions?: string;
+  logoCompositionApplied?: boolean;
 }): string {
   const {
     rootSourceDamAssetId,
@@ -38,7 +41,8 @@ function buildLineageString(options: {
     generationSource,
     formatAdaptation,
     targetDimensions,
-    sourceImageDimensions
+    sourceImageDimensions,
+    logoCompositionApplied
   } = options;
   const parts = [`Adobe DAM · ${rootSourceDamAssetId}`];
   if (editSourceAssetId !== rootSourceDamAssetId) {
@@ -53,8 +57,13 @@ function buildLineageString(options: {
   } else {
     parts.push('Adobe Firefly generation');
   }
+  // Adapt before logo so the owned mark is composed onto the final channel canvas
+  // and is not cropped away by cover-fit.
   if (formatAdaptation === 'cover-crop' && targetDimensions) {
     parts.push(`channel crop/format adaptation (${targetDimensions})`);
+  }
+  if (logoCompositionApplied) {
+    parts.push('approved Barclays logo composition');
   }
   return parts.join(' → ');
 }
@@ -72,6 +81,16 @@ export function buildDerivedAsset(options: {
   targetDimensions?: string;
   finalImageDimensions?: string;
   formatAdaptation?: 'cover-crop' | 'none';
+  /** Compact KG provenance — set when compatible brand guidance was applied. */
+  brandGrounding?: BrandGroundingMetadata;
+  /** Exact owned-logo composition applied after Firefly generation. */
+  logoComposition?: LogoCompositionMetadata;
+  /** Shared id for one Firefly generation distributed across channel slots. */
+  generationFamilyId?: string;
+  /** Raw / master Firefly artifact id that channel derivatives were adapted from. */
+  masterGeneratedAssetId?: string;
+  /** Same as masterGeneratedAssetId when this record is a channel derivative. */
+  derivedFromMasterGeneratedAssetId?: string;
 }): DerivedCampaignAsset {
   const { request, specification, referenceSource, imageUrl, jobId } = options;
   const generationSource = options.generationSource ?? 'firefly';
@@ -81,6 +100,11 @@ export function buildDerivedAsset(options: {
   const id = `${prefix}-DER-${randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()}`;
   const resolvedJobId = jobId ?? `${prefix}-ADAPT-${String(Date.now()).slice(-5)}`;
   const formatAdaptation = options.formatAdaptation ?? 'none';
+  const brandGrounding = options.brandGrounding;
+  const logoComposition = options.logoComposition;
+  const approval = brandGrounding?.applied
+    ? 'Brand guidance applied'
+    : 'Campaign creative draft';
 
   return {
     id,
@@ -95,7 +119,8 @@ export function buildDerivedAsset(options: {
       generationSource,
       formatAdaptation,
       targetDimensions: options.targetDimensions,
-      sourceImageDimensions: options.sourceImageDimensions
+      sourceImageDimensions: options.sourceImageDimensions,
+      logoCompositionApplied: logoComposition?.applied === true
     }),
     derived: true,
     generationSource,
@@ -127,13 +152,18 @@ export function buildDerivedAsset(options: {
     generated: true,
     adapted: true,
     included: false,
-    approval: 'Automated brand check passed',
+    approval,
     confidence: 'Campaign-ready draft',
     matchReason:
       isGeminiSource(generationSource)
         ? 'Gemini edited the current asset while Title, Description and CTA remained authoritative.'
         : 'Adobe Firefly generated a new visual while Title, Description and CTA remained authoritative.',
     commentsKey: `dam-derived-${id.toLowerCase()}`,
-    version: 1
+    version: 1,
+    brandGrounding,
+    logoComposition,
+    generationFamilyId: options.generationFamilyId,
+    masterGeneratedAssetId: options.masterGeneratedAssetId,
+    derivedFromMasterGeneratedAssetId: options.derivedFromMasterGeneratedAssetId
   };
 }

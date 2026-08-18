@@ -42,6 +42,8 @@ export type GeminiImageEditRequest = {
   format?: string;
   dimensions?: string;
   guardrails: string[];
+  /** Compatible Barclays KG brand rules (optional; after user instruction in the prompt). */
+  brandGuardrails?: string[];
   authoritativeContent: {
     title: string;
     description: string;

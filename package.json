@@ -16,6 +16,7 @@
     "react-dom": "latest",
     "sharp": "^0.35.3",
     "typescript": "latest",
+    "undici": "^8.10.0",
     "vite": "latest"
   },
   "devDependencies": {

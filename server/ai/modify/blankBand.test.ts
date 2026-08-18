@@ -96,6 +96,47 @@ describe('scanInteriorBlankBands', () => {
     expect(await hasInteriorBlankBand(image)).toBe(false);
   });
 
+  it('does not flag the whitespace under a thin preheader strip as a split', async () => {
+    // Reproduces the structure Gemini returned for the LinkedIn mobile edit: a thin
+    // preheader line (~3% of the height), a full-width whitespace gap, then the body.
+    // The minority side carries only ~3% content, so the gap is a stacked-layout margin,
+    // not a panel-splitting gutter. Before the side-content rule this was a false positive.
+    const preheader = await solid(1024, 31, DEEP_BLUE);
+    const body = await solid(1024, 949, DEEP_BLUE);
+    const image = await sharp({
+      create: { width: 1024, height: 1024, channels: 3, background: WHITE }
+    })
+      .composite([
+        { input: preheader, left: 0, top: 10 },
+        { input: body, left: 0, top: 75 }
+      ])
+      .png()
+      .toBuffer();
+
+    // The gap between rows 41 and 74 is a genuine full-width blank band above the minimum
+    // thickness — it is only excused because the content above it is a thin strip.
+    expect(await hasInteriorBlankBand(image)).toBe(false);
+  });
+
+  it('still flags an unequal split when the minority side is substantial', async () => {
+    // Top panel is ~18% of the height — well above the thin-strip margin — so a full-width
+    // gutter below it is a real split and must stay rejected.
+    const topPanel = await solid(1024, 180, DEEP_BLUE);
+    const bottomPanel = await solid(1024, 804, DEEP_BLUE);
+    const image = await sharp({
+      create: { width: 1024, height: 1024, channels: 3, background: WHITE }
+    })
+      .composite([
+        { input: topPanel, left: 0, top: 0 },
+        { input: bottomPanel, left: 0, top: 220 }
+      ])
+      .png()
+      .toBuffer();
+
+    const scan = await scanInteriorBlankBands(image);
+    expect(scan.bands.map((band) => band.orientation)).toContain('horizontal');
+  });
+
   it('ignores a hairline band below the minimum thickness', async () => {
     const panel = await solid(500, 1080, DEEP_BLUE);
     const image = await sharp({ create: { width: 1080, height: 1080, channels: 3, background: WHITE } })

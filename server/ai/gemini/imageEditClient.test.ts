@@ -238,6 +238,9 @@ describe('createGeminiImageEditClient', () => {
       expect(prompt).toMatch(/split screen|side-by-side layout/);
       expect(prompt).toContain('Remove all requested text, letters, numbers, logos, and labels completely.');
       expect(prompt).toContain('Additional constraints:');
+      expect(prompt).toContain('Do not reproduce the source twice.');
+      expect(prompt).toContain('Do not add a second browser window, email client');
+      expect(prompt).toContain('Return exactly one flattened final image');
       expect(form.get('model')).toBe('gemini-2.5-flash-image');
       expect(form.get('response_format')).toBe('b64_json');
       expect(form.get('image')).toBeTruthy();
@@ -257,7 +260,10 @@ describe('createGeminiImageEditClient', () => {
     const result = await client!.editImage({
       instruction:
         'Remove all visible text and logos while preserving the existing background, colors, people and composition.',
-      image: { bytes: PNG, mimeType: 'image/png', assetId: 'DAM-0188' },
+      image: { bytes: PNG, mimeType: 'image/png', assetId: 'DAM-0231' },
+      channel: 'Email',
+      format: 'HTML email hero',
+      dimensions: '1200 × 480',
       guardrails: ['Do not render Title into the image.'],
       authoritativeContent: {
         title: 'Discover iPortal',

@@ -16,7 +16,16 @@ export function barclaysAiApiPlugin(): Plugin {
     configureServer(server) {
       // Dev-server API routes read credentials from process.env, which Vite does not populate.
       loadServerEnvFile(server.config.root);
-      console.log('[barclays-ai-api] mounted', JSON.stringify(describeServerAiEnv()));
+      const env = describeServerAiEnv();
+      console.log('[barclays-ai-api] mounted', JSON.stringify(env));
+      if (env.fireflyLive && !env.useSystemCa) {
+        // NODE_OPTIONS must be set before Node starts, so a plain `npm run dev` silently drops it
+        // and every Adobe IMS call fails at the TLS handshake with a bare "fetch failed".
+        console.warn(
+          '[barclays-ai-api] FIREFLY_LIVE=1 without --use-system-ca. ' +
+            'Start the dev server with NODE_OPTIONS=--use-system-ca or Firefly auth will fail.'
+        );
+      }
 
       server.middlewares.use((req, res, next) => {
         const url = req.url?.split('?')[0] ?? '';
